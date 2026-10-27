@@ -1,0 +1,11 @@
+[package]
+name = "clipboard-sync"
+description = "Sincronização de clipboard de texto (Fase 4)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

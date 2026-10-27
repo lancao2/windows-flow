@@ -1,0 +1,18 @@
+[package]
+name = "transport"
+description = "Conexão autenticada e criptografada entre pares (Fase 1)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+protocol = { version = "0.2.1", path = "../protocol" }
+rcgen = "0.14.10"
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+sha2 = "0.11.1"
+thiserror.workspace = true
+tokio = { version = "1.54.1", features = ["net", "io-util", "time", "sync", "rt", "macros"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
+
+[lints]
+workspace = true

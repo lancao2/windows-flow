@@ -1,0 +1,11 @@
+[package]
+name = "discovery"
+description = "Descoberta de dispositivos na LAN via mDNS (Fase 3). Anúncios nunca provam identidade."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

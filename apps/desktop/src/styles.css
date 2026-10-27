@@ -1,0 +1,145 @@
+:root {
+  color-scheme: dark;
+}
+body {
+  margin: 0;
+  font-family: 'Segoe UI', sans-serif;
+  background: #101418;
+  color: #e8edf2;
+}
+.app {
+  padding: 20px 24px;
+  max-width: 760px;
+  margin: 0 auto;
+}
+header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+h1 {
+  margin: 0 0 8px;
+  font-size: 22px;
+}
+h2 {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+.card {
+  background: #182028;
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin: 12px 0;
+}
+.muted {
+  color: #8a96a3;
+}
+.error {
+  color: #ff8a80;
+}
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 8px 0;
+}
+input {
+  flex: 1;
+  min-width: 220px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid #33414f;
+  background: #0f151b;
+  color: inherit;
+}
+button {
+  padding: 8px 14px;
+  border-radius: 6px;
+  border: 1px solid #33414f;
+  background: #22303c;
+  color: inherit;
+  cursor: pointer;
+}
+button:hover:not(:disabled) {
+  background: #2b3d4c;
+}
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+button.selected,
+button.primary {
+  background: #2563eb;
+  border-color: #2563eb;
+}
+button.danger {
+  background: #b3261e;
+  border-color: #b3261e;
+}
+.banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: #7a4b00;
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin: 12px 0;
+  position: sticky;
+  top: 8px;
+}
+.log {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  max-height: 160px;
+  overflow: auto;
+}
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: grid;
+  place-items: center;
+}
+.dialog {
+  background: #182028;
+  border-radius: 10px;
+  padding: 24px;
+  max-width: 420px;
+}
+.sas {
+  font-size: 40px;
+  letter-spacing: 6px;
+  text-align: center;
+  font-family: Consolas, monospace;
+  margin: 16px 0;
+}
+
+/* Overlay do portal: totalmente transparente. */
+body.portal-body {
+  background: transparent;
+  overflow: hidden;
+}
+.portal-canvas {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+}
+.steps {
+  margin: 4px 0 0;
+  padding-left: 20px;
+}
+.steps li {
+  margin: 4px 0;
+}
+.big-ip {
+  font-size: 20px;
+  font-family: Consolas, monospace;
+  color: #7dd3fc;
+}

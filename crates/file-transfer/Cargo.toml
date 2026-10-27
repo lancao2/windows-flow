@@ -1,0 +1,11 @@
+[package]
+name = "file-transfer"
+description = "Transferência de arquivos e pastas (Fase 5)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

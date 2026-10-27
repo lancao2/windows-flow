@@ -1,0 +1,19 @@
+[package]
+name = "continuity-core"
+description = "Máquina de estados, roteamento e política de controle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+protocol = { version = "0.2.1", path = "../protocol" }
+transport = { version = "0.2.1", path = "../transport" }
+windows-input = { version = "0.2.1", path = "../windows-input" }
+tokio = { version = "1.54.1", features = ["rt", "time", "sync", "macros"] }
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "time", "sync", "macros", "net"] }
+
+[lints]
+workspace = true

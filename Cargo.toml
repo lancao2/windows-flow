@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/protocol",
+    "crates/continuity-core",
+    "crates/windows-input",
+    "crates/transport",
+    "crates/discovery",
+    "crates/clipboard-sync",
+    "crates/file-transfer",
+    "apps/desktop/src-tauri",
+]
+
+[workspace.package]
+version = "0.2.1"
+edition = "2021"
+license = "UNLICENSED"
+rust-version = "1.88"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

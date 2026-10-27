@@ -1,0 +1,24 @@
+[package]
+name = "windows-flow"
+description = "Windows Flow desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "windows_flow_lib"
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+continuity-core = { path = "../../../crates/continuity-core" }
+protocol = { path = "../../../crates/protocol" }
+windows-input = { version = "0.2.1", path = "../../../crates/windows-input" }
+tokio = { version = "1.54.1", default-features = false, features = ["sync", "time"] }
+serde = { workspace = true, features = ["derive"] }
+
+[lints]
+workspace = true

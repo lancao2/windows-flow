@@ -1,0 +1,16 @@
+{
+  "name": "@windows-flow/shared-types",
+  "version": "0.2.1",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "echo ok",
+    "test": "echo ok"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}
