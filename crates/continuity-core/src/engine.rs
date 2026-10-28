@@ -5,12 +5,18 @@
 //! - Só se captura/suprime entrada em REMOTE; qualquer falha chama [`Engine::recover`].
 //! - Só se injeta entrada vinda do par enquanto este PC concedeu o controle.
 
+use std::collections::VecDeque;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use protocol::{Message, MAX_POINTER_DELTA, NONCE_LEN, PROTOCOL_VERSION};
+use file_transfer::{Incoming, Outgoing};
+use protocol::{
+    base64_decode, base64_encode, Message, MAX_FILES_PER_BATCH, MAX_FILE_CHUNK, MAX_POINTER_DELTA,
+    NONCE_LEN, PROTOCOL_VERSION,
+};
 use serde::Serialize;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
@@ -42,6 +48,8 @@ pub struct EngineConfig {
     pub rearm_px: i32,
     /// Empurrão (px) contra a borda de volta para devolver o controle.
     pub return_push_px: i32,
+    /// Onde os arquivos recebidos são gravados.
+    pub download_dir: PathBuf,
 }
 
 impl EngineConfig {
@@ -52,6 +60,9 @@ impl EngineConfig {
             edge_dwell_ms: 60,
             rearm_px: 24,
             return_push_px: 15,
+            download_dir: std::env::var_os("USERPROFILE")
+                .map(|h| PathBuf::from(h).join("Downloads"))
+                .unwrap_or_else(|| PathBuf::from("Downloads")),
         }
     }
 }
@@ -67,7 +78,35 @@ pub enum Command {
     /// Encerra a conexão e esquece a confiança no par.
     Disconnect,
     SetPeerSide(Side),
+    /// Envia arquivos ao par; `ratio` é a posição na borda por onde "atravessam".
+    SendFiles {
+        paths: Vec<PathBuf>,
+        ratio: u16,
+    },
     Shutdown,
+}
+
+/// Andamento de um arquivo de um lote, para a bandeja e o anel de progresso.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FileEvent {
+    /// `in` (recebendo) ou `out` (enviando).
+    pub dir: &'static str,
+    /// `offer` | `progress` | `done` | `failed`
+    pub state: &'static str,
+    pub id: u64,
+    pub name: String,
+    pub size: u64,
+    pub index: u32,
+    pub count: u32,
+    /// Bytes já concluídos do lote (incluindo o andamento do arquivo atual).
+    pub batch_done: u64,
+    pub batch_bytes: u64,
+    /// Posição na borda (0..=10000) por onde o arquivo atravessa.
+    pub ratio: u16,
+    pub side: &'static str,
+    pub screen: [i32; 4],
+    /// Caminho final do arquivo recebido (só em `done`).
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -100,6 +139,7 @@ pub enum UiEvent {
         enter: bool,
         screen: [i32; 4],
     },
+    File(FileEvent),
 }
 
 #[derive(Clone)]
@@ -131,6 +171,49 @@ struct Link {
     ready: bool,
 }
 
+/// Lote em envio: arquivos já abertos, na ordem.
+struct OutBatch {
+    queue: VecDeque<Outgoing>,
+    count: u32,
+    bytes: u64,
+    /// Bytes dos arquivos já confirmados.
+    done: u64,
+    ratio: u16,
+    next_index: u32,
+}
+
+/// Lote em recebimento.
+struct InBatch {
+    count: u32,
+    bytes: u64,
+    done: u64,
+    ratio: u16,
+    index: u32,
+}
+
+/// Cópia dos números do lote para montar um [`FileEvent`].
+struct InBatchView {
+    count: u32,
+    bytes: u64,
+    done: u64,
+    ratio: u16,
+}
+
+impl InBatch {
+    fn view(&self) -> InBatchView {
+        InBatchView {
+            count: self.count,
+            bytes: self.bytes,
+            done: self.done,
+            ratio: self.ratio,
+        }
+    }
+}
+
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(40);
+/// O receptor confirma a cada tantos chunks (e sempre ao completar).
+const ACK_EVERY: u64 = 4 * MAX_FILE_CHUNK as u64;
+
 pub struct Engine<P: Platform> {
     p: P,
     cfg: EngineConfig,
@@ -161,6 +244,13 @@ pub struct Engine<P: Platform> {
     entry_ratio: u16,
     epoch: Instant,
     nonce_counter: u64,
+    out_batch: Option<OutBatch>,
+    outgoing: Option<Outgoing>,
+    out_id: u64,
+    in_batch: Option<InBatch>,
+    incoming: Option<Incoming>,
+    last_acked: u64,
+    last_progress: Instant,
 }
 
 impl<P: Platform + 'static> Engine<P> {
@@ -202,6 +292,13 @@ impl<P: Platform + 'static> Engine<P> {
             entry_ratio: 0,
             epoch: Instant::now(),
             nonce_counter: 0,
+            out_batch: None,
+            outgoing: None,
+            out_id: 0,
+            in_batch: None,
+            incoming: None,
+            last_acked: 0,
+            last_progress: Instant::now(),
         };
         Ok((engine, EngineHandle { tx: cmd_tx }))
     }
@@ -358,6 +455,7 @@ impl<P: Platform + 'static> Engine<P> {
     }
 
     fn drop_link(&mut self) {
+        self.abort_transfers(false);
         self.p.performance(false);
         self.link = None;
         self.peer_addr = None;
@@ -431,6 +529,7 @@ impl<P: Platform + 'static> Engine<P> {
                     self.emit_status();
                 }
             }
+            Command::SendFiles { paths, ratio } => self.start_send(paths, ratio),
             Command::Shutdown => return true,
         }
         false
@@ -569,7 +668,19 @@ impl<P: Platform + 'static> Engine<P> {
                     });
                 }
             }
-            // Heartbeat é tratado pela sessão; clipboard e arquivos são de fases futuras.
+            Message::FileOffer {
+                id,
+                name,
+                size,
+                index,
+                count,
+                batch_bytes,
+                ratio,
+            } => self.on_file_offer(id, name, size, index, count, batch_bytes, ratio),
+            Message::FileChunk { id, offset, data } => self.on_file_chunk(id, offset, &data),
+            Message::FileAck { id, offset } => self.on_file_ack(id, offset),
+            Message::FileCancel { id } => self.on_file_cancel(id),
+            // Heartbeat é tratado pela sessão; o clipboard é de uma fase futura.
             Message::Heartbeat { .. } | Message::ClipboardText { .. } => {}
         }
     }
@@ -712,6 +823,326 @@ impl<P: Platform + 'static> Engine<P> {
         });
     }
 
+    // ---- arquivos --------------------------------------------------------
+
+    fn emit_file(
+        &self,
+        dir: &'static str,
+        state: &'static str,
+        f: (u64, &str, u64, u32),
+        b: &InBatchView,
+        path: Option<String>,
+    ) {
+        let s = self.p.screen();
+        let _ = self.ui.send(UiEvent::File(FileEvent {
+            dir,
+            state,
+            id: f.0,
+            name: f.1.to_string(),
+            size: f.2,
+            index: f.3,
+            count: b.count,
+            batch_done: b.done,
+            batch_bytes: b.bytes,
+            ratio: b.ratio,
+            side: side_str(self.cfg.peer_side),
+            screen: [s.left, s.top, s.right, s.bottom],
+            path,
+        }));
+    }
+
+    /// Cancela tudo o que está em andamento. `tell_peer`: avisa o outro PC.
+    fn abort_transfers(&mut self, tell_peer: bool) {
+        if let Some(o) = self.outgoing.take() {
+            if tell_peer {
+                self.send(Message::FileCancel { id: o.id });
+            }
+        }
+        self.out_batch = None;
+        if let Some(i) = self.incoming.take() {
+            if tell_peer {
+                self.send(Message::FileCancel { id: i.id });
+            }
+            if let Some(b) = &self.in_batch {
+                let view = InBatchView {
+                    count: b.count,
+                    bytes: b.bytes,
+                    done: b.done,
+                    ratio: b.ratio,
+                };
+                self.emit_file(
+                    "in",
+                    "failed",
+                    (i.id, &i.name, i.size, b.index),
+                    &view,
+                    None,
+                );
+            }
+        }
+        self.in_batch = None;
+    }
+
+    fn start_send(&mut self, paths: Vec<PathBuf>, ratio: u16) {
+        if !self.link_ready() {
+            self.notice("Conecte os dois PCs antes de enviar arquivos.");
+            return;
+        }
+        if self.out_batch.is_some() {
+            self.notice("Já existe um envio em andamento.");
+            return;
+        }
+        let mut queue = VecDeque::new();
+        let mut skipped = 0;
+        for p in paths.into_iter().take(MAX_FILES_PER_BATCH as usize) {
+            self.out_id += 1;
+            match Outgoing::open(self.out_id, &p) {
+                Ok(o) => queue.push_back(o),
+                Err(_) => skipped += 1,
+            }
+        }
+        if skipped > 0 {
+            self.notice(format!(
+                "{skipped} item(ns) ignorado(s): só arquivos comuns são enviados (pastas não)."
+            ));
+        }
+        if queue.is_empty() {
+            return;
+        }
+        self.out_batch = Some(OutBatch {
+            count: queue.len() as u32,
+            bytes: queue.iter().map(|o| o.size).sum(),
+            queue,
+            done: 0,
+            ratio: ratio.min(protocol::MAX_RATIO),
+            next_index: 0,
+        });
+        self.next_outgoing();
+    }
+
+    /// Anuncia o próximo arquivo do lote, ou encerra o lote.
+    fn next_outgoing(&mut self) {
+        let Some(b) = self.out_batch.as_mut() else {
+            return;
+        };
+        let Some(o) = b.queue.pop_front() else {
+            self.out_batch = None;
+            return;
+        };
+        let index = b.next_index;
+        b.next_index += 1;
+        let offer = Message::FileOffer {
+            id: o.id,
+            name: o.name.clone(),
+            size: o.size,
+            index,
+            count: b.count,
+            batch_bytes: b.bytes,
+            ratio: b.ratio,
+        };
+        self.outgoing = Some(o);
+        if !self.send(offer) {
+            self.abort_transfers(false);
+            self.notice("Não foi possível iniciar o envio do arquivo.");
+            return;
+        }
+        self.pump_out();
+    }
+
+    /// Envia chunks enquanto a janela permitir; avança para o próximo arquivo ao concluir.
+    fn pump_out(&mut self) {
+        loop {
+            let Some(o) = self.outgoing.as_mut() else {
+                return;
+            };
+            if o.is_done() {
+                // Arquivo vazio: o receptor já o concluiu ao receber a oferta.
+                self.finish_outgoing();
+                continue;
+            }
+            match o.next_chunk() {
+                Ok(Some((offset, data))) => {
+                    let m = Message::FileChunk {
+                        id: o.id,
+                        offset,
+                        data: base64_encode(&data),
+                    };
+                    if !self.send(m) {
+                        self.abort_transfers(false);
+                        self.notice("Envio interrompido: fila de saída cheia.");
+                        return;
+                    }
+                }
+                Ok(None) => return,
+                Err(e) => {
+                    self.abort_transfers(true);
+                    self.notice(format!("Falha ao ler o arquivo: {e}"));
+                    return;
+                }
+            }
+        }
+    }
+
+    fn finish_outgoing(&mut self) {
+        if let Some(o) = self.outgoing.take() {
+            if let Some(b) = self.out_batch.as_mut() {
+                b.done += o.size;
+                if b.queue.is_empty() {
+                    self.notice(format!("Enviado: {}", o.name));
+                }
+            }
+        }
+        self.next_outgoing();
+    }
+
+    fn on_file_ack(&mut self, id: u64, offset: u64) {
+        let Some(o) = self.outgoing.as_mut().filter(|o| o.id == id) else {
+            return;
+        };
+        o.ack(offset);
+        if o.is_done() {
+            self.finish_outgoing();
+        } else {
+            self.pump_out();
+        }
+    }
+
+    fn on_file_cancel(&mut self, id: u64) {
+        if self.outgoing.as_ref().is_some_and(|o| o.id == id) {
+            self.abort_transfers(false);
+            self.notice("O outro PC cancelou o recebimento.");
+        } else if self.incoming.as_ref().is_some_and(|i| i.id == id) {
+            self.abort_transfers(false);
+            self.notice("O outro PC cancelou o envio.");
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn on_file_offer(
+        &mut self,
+        id: u64,
+        name: String,
+        size: u64,
+        index: u32,
+        count: u32,
+        batch_bytes: u64,
+        ratio: u16,
+    ) {
+        // Só aceita arquivos com a sessão pronta (o Hello do par já passou).
+        if !self.link_ready() {
+            return;
+        }
+        // Oferta nova: descarta o recebimento anterior. Um lote novo (índice 0) recomeça a
+        // contagem; no meio de um lote, mantém o que já chegou.
+        let prev_done = if index == 0 {
+            0
+        } else {
+            self.in_batch.as_ref().map_or(0, |b| b.done)
+        };
+        self.incoming = None;
+        let inc = match Incoming::create(&self.cfg.download_dir, id, &name, size) {
+            Ok(i) => i,
+            Err(e) => {
+                self.send(Message::FileCancel { id });
+                self.in_batch = None;
+                self.notice(format!("Não foi possível receber \"{name}\": {e}"));
+                return;
+            }
+        };
+        let batch = InBatch {
+            count,
+            bytes: batch_bytes,
+            done: prev_done,
+            ratio,
+            index,
+        };
+        self.last_acked = 0;
+        self.last_progress = Instant::now();
+        self.emit_file(
+            "in",
+            "offer",
+            (id, &inc.name, size, index),
+            &batch.view(),
+            None,
+        );
+        self.in_batch = Some(batch);
+        self.incoming = Some(inc);
+        if size == 0 {
+            self.complete_incoming();
+        }
+    }
+
+    fn on_file_chunk(&mut self, id: u64, offset: u64, data: &str) {
+        let Some(bytes) = base64_decode(data) else {
+            return;
+        };
+        let Some(inc) = self.incoming.as_mut().filter(|i| i.id == id) else {
+            return;
+        };
+        match inc.write(offset, &bytes) {
+            Ok(received) => {
+                if inc.is_complete() {
+                    self.complete_incoming();
+                    return;
+                }
+                if received - self.last_acked >= ACK_EVERY {
+                    self.last_acked = received;
+                    self.send(Message::FileAck {
+                        id,
+                        offset: received,
+                    });
+                }
+                if self.last_progress.elapsed() >= PROGRESS_INTERVAL {
+                    self.last_progress = Instant::now();
+                    if let (Some(inc), Some(b)) = (&self.incoming, &self.in_batch) {
+                        let mut view = b.view();
+                        view.done += inc.received();
+                        self.emit_file(
+                            "in",
+                            "progress",
+                            (inc.id, &inc.name, inc.size, b.index),
+                            &view,
+                            None,
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                self.abort_transfers(true);
+                self.notice(format!("Falha ao gravar o arquivo recebido: {e:?}"));
+            }
+        }
+    }
+
+    /// Fecha o arquivo recebido (renomeia, avisa o par e a interface).
+    fn complete_incoming(&mut self) {
+        let Some(inc) = self.incoming.take() else {
+            return;
+        };
+        let (id, name, size) = (inc.id, inc.name.clone(), inc.size);
+        match inc.finish() {
+            Ok(path) => {
+                self.send(Message::FileAck { id, offset: size });
+                if let Some(b) = self.in_batch.as_mut() {
+                    b.done += size;
+                }
+                if let Some(b) = &self.in_batch {
+                    self.emit_file(
+                        "in",
+                        "done",
+                        (id, &name, size, b.index),
+                        &b.view(),
+                        Some(path.to_string_lossy().into_owned()),
+                    );
+                }
+            }
+            Err(e) => {
+                self.send(Message::FileCancel { id });
+                self.in_batch = None;
+                self.notice(format!("Não foi possível salvar \"{name}\": {e}"));
+            }
+        }
+    }
+
     // ---- ticks -----------------------------------------------------------
 
     fn on_fast_tick(&mut self) {
@@ -728,6 +1159,17 @@ impl<P: Platform + 'static> Engine<P> {
             return;
         }
         if self.controlled || !self.link_ready() {
+            return;
+        }
+        // Botão esquerdo pressionado = arrastando algo (arquivos para a borda de envio): não
+        // cruza; ao soltar, é preciso se afastar da borda antes de cruzar de novo.
+        if self.p.primary_button_down() {
+            if self.fsm == State::Armed {
+                self.disarm();
+                self.emit_status();
+            } else {
+                self.edge.block();
+            }
             return;
         }
         let (pos, screen, now) = (self.p.cursor(), self.p.screen(), self.now_ms());

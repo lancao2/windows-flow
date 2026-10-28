@@ -42,4 +42,45 @@ export interface DeviceInfo {
   portal_health: string;
 }
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
+
+/** Posição da janela de transferência rente à borda (espelha xfer::Placement). */
+export interface XferPlacement {
+  side: Side;
+  /** Ponto de contato ao longo da borda, em px CSS dentro da janela. */
+  v: number;
+  w: number;
+  h: number;
+}
+
+/** Evento da janela de envio (captura do arrastar). */
+export interface XferSendEvent {
+  kind: 'catch' | 'hold' | 'cancel' | 'commit' | 'idle';
+  /** Progresso do anel, 0..1. */
+  p: number;
+  placement: XferPlacement | null;
+  /** Posição do cursor ao longo da borda, em px CSS dentro da janela. */
+  v: number;
+}
+
+/** Espelha continuity_core::engine::FileEvent. */
+export interface FileEvent {
+  dir: 'in' | 'out';
+  state: 'offer' | 'progress' | 'done' | 'failed';
+  id: number;
+  name: string;
+  size: number;
+  index: number;
+  count: number;
+  batch_done: number;
+  batch_bytes: number;
+  ratio: number;
+  side: Side;
+  screen: [number, number, number, number];
+  path: string | null;
+}
+
+export interface XferRecvEvent {
+  file: FileEvent;
+  placement: XferPlacement | null;
+}

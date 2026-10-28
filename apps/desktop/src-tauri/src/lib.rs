@@ -15,6 +15,8 @@ use tokio::sync::mpsc;
 use windows_input::windows_impl::WinPlatform;
 use windows_input::Side;
 
+mod xfer;
+
 const DEFAULT_PORT: u16 = 47_800;
 /// Espessura (px físicos) da faixa do overlay de portal junto à borda.
 const PORTAL_DEPTH: i32 = 440;
@@ -31,6 +33,7 @@ struct App {
     snapshot: Mutex<Vec<u8>>,
     /// Último estado informado pelo overlay (WebGL ok, plano B, erro de shader...).
     portal_health: Mutex<String>,
+    xfer: Mutex<xfer::Xfer>,
 }
 
 #[derive(Serialize, Clone)]
@@ -154,6 +157,7 @@ fn forward_events(app: AppHandle, mut rx: mpsc::UnboundedReceiver<UiEvent>) {
                     enter,
                     screen,
                 } => show_portal(&app, side, ratio, enter, screen),
+                UiEvent::File(f) => xfer::on_file_event(&app, f),
             }
         }
     });
@@ -244,7 +248,7 @@ fn show_portal(app: &AppHandle, side: &str, ratio: u16, enter: bool, s: [i32; 4]
 /// manter o tamanho lógico; por isso movemos primeiro, dimensionamos depois e conferimos,
 /// repetindo se o tamanho real não bater. Uma janela menor que a captura deixaria uma
 /// borda nítida entre o trecho distorcido e a tela real.
-fn place_overlay(win: &tauri::WebviewWindow, x: i32, y: i32, w: i32, h: i32) -> bool {
+pub(crate) fn place_overlay(win: &tauri::WebviewWindow, x: i32, y: i32, w: i32, h: i32) -> bool {
     let (w, h) = (w.max(1) as u32, h.max(1) as u32);
     for _ in 0..5 {
         let _ = win.set_position(PhysicalPosition::new(x, y));
@@ -343,18 +347,29 @@ fn show_main_window(app: &AppHandle) {
 
 /// Cria (oculta) a janela do overlay. Transparente, sem foco, sempre no topo e ignorando o mouse.
 fn create_portal_window(app: &tauri::App) -> tauri::Result<()> {
-    let win = WebviewWindowBuilder::new(app, "portal", WebviewUrl::App("index.html#portal".into()))
-        .title("Windows Flow Portal")
-        .decorations(false)
-        .transparent(true)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .shadow(false)
-        .resizable(false)
-        .focused(false)
-        .focusable(false)
-        .visible(false)
-        .build()?;
+    let win = WebviewWindowBuilder::new(
+        app,
+        "portal",
+        WebviewUrl::App(
+            if std::env::args().any(|a| a == "--force-2d") {
+                "index.html#portal-2d"
+            } else {
+                "index.html#portal"
+            }
+            .into(),
+        ),
+    )
+    .title("Windows Flow Portal")
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .shadow(false)
+    .resizable(false)
+    .focused(false)
+    .focusable(false)
+    .visible(false)
+    .build()?;
     win.set_ignore_cursor_events(true)?;
     Ok(())
 }
@@ -372,13 +387,21 @@ pub fn run() {
             set_portal_enabled,
             portal_snapshot,
             portal_report,
-            preview_portal
+            preview_portal,
+            xfer::xfer_layout,
+            xfer::xfer_hide,
+            xfer::xfer_dismiss,
+            xfer::xfer_drag
         ])
         .on_window_event(|window, event| {
             // Fechar a janela mantém o app na bandeja; "Sair" encerra de verdade.
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
+            match event {
+                WindowEvent::CloseRequested { api, .. } => {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+                WindowEvent::DragDrop(e) => xfer::on_drag_drop(window, e),
+                _ => {}
             }
         })
         .setup(|app| {
@@ -387,12 +410,9 @@ pub fn run() {
             let hotkey_registered = platform.hotkey_registered();
             let device = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "windows-flow".into());
             let (ui_tx, ui_rx) = mpsc::unbounded_channel();
-            let (engine, handle) = Engine::new(
-                platform,
-                input_rx,
-                EngineConfig::new(device, Side::Right),
-                ui_tx,
-            )?;
+            let mut config = EngineConfig::new(device, Side::Right);
+            config.download_dir = windows_input::windows_impl::downloads_dir();
+            let (engine, handle) = Engine::new(platform, input_rx, config, ui_tx)?;
 
             app.manage(App {
                 engine: handle,
@@ -402,8 +422,18 @@ pub fn run() {
                 portal_gen: AtomicU64::new(0),
                 snapshot: Mutex::new(Vec::new()),
                 portal_health: Mutex::new("aguardando o overlay iniciar".into()),
+                xfer: Mutex::new(xfer::Xfer::default()),
             });
             create_portal_window(app)?;
+            xfer::create_windows(app)?;
+            xfer::start_watcher(app.handle().clone());
+            if std::env::args().any(|a| a == "--preview-xfer") {
+                let h = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    xfer::run_preview(h);
+                });
+            }
             // Flag de QA: mostra a animação logo após abrir, sem precisar de dois PCs.
             if let Some(arg) = std::env::args().find(|a| a.starts_with("--preview-portal")) {
                 let side: &'static str = match arg.split('=').nth(1) {

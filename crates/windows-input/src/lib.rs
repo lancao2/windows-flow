@@ -7,6 +7,8 @@
 pub use protocol::{ButtonState, PointerButton};
 
 #[cfg(windows)]
+mod shell;
+#[cfg(windows)]
 pub mod windows_impl;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +126,10 @@ pub trait Platform: Send {
     /// No PC controlado: engole a entrada física (a injetada continua passando).
     /// Clique, rolagem ou tecla física gera [`InputEvent::Takeover`] e desliga o bloqueio.
     fn block_local(&mut self, _on: bool) {}
+    /// Botão esquerdo do mouse pressionado fisicamente (arrastar arquivos até a borda).
+    fn primary_button_down(&self) -> bool {
+        false
+    }
     /// Pede timers de alta resolução enquanto há sessão ativa.
     fn performance(&mut self, _on: bool) {}
     /// Prova de vida do motor. Sem isso por 2 s a captura se desliga sozinha.

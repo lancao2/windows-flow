@@ -16,7 +16,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon"] }
 continuity-core = { path = "../../../crates/continuity-core" }
 protocol = { path = "../../../crates/protocol" }
-windows-input = { version = "0.2.1", path = "../../../crates/windows-input" }
+windows-input = { version = "0.3.0", path = "../../../crates/windows-input" }
 tokio = { version = "1.54.1", default-features = false, features = ["sync", "time"] }
 serde = { workspace = true, features = ["derive"] }
 

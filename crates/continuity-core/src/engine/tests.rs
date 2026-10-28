@@ -24,6 +24,7 @@ struct Fake {
     capturing: bool,
     blocked: bool,
     release_calls: u32,
+    button_down: bool,
 }
 
 #[derive(Clone, Default)]
@@ -75,6 +76,9 @@ impl Platform for FakePlatform {
     fn block_local(&mut self, on: bool) {
         self.0.lock().unwrap().blocked = on;
     }
+    fn primary_button_down(&self) -> bool {
+        self.0.lock().unwrap().button_down
+    }
     fn keepalive(&self) {}
 }
 
@@ -96,6 +100,8 @@ struct Node {
     last: Option<Status>,
     sas: Option<String>,
     portals: Vec<(&'static str, u16, bool)>,
+    files: Vec<FileEvent>,
+    downloads: std::path::PathBuf,
 }
 
 impl Node {
@@ -103,8 +109,12 @@ impl Node {
         let fake = FakePlatform::default();
         let (input, input_rx) = mpsc::unbounded_channel();
         let (ui_tx, ui) = mpsc::unbounded_channel();
-        let (engine, handle) =
-            Engine::new(fake.clone(), input_rx, EngineConfig::new(name, side), ui_tx).unwrap();
+        let mut cfg = EngineConfig::new(name, side);
+        let downloads =
+            std::env::temp_dir().join(format!("wf-engine-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&downloads);
+        cfg.download_dir = downloads.clone();
+        let (engine, handle) = Engine::new(fake.clone(), input_rx, cfg, ui_tx).unwrap();
         tokio::spawn(engine.run());
         Node {
             fake,
@@ -114,6 +124,8 @@ impl Node {
             last: None,
             sas: None,
             portals: vec![],
+            files: vec![],
+            downloads,
         }
     }
 
@@ -124,6 +136,7 @@ impl Node {
             Ok(Some(UiEvent::Portal {
                 side, ratio, enter, ..
             })) => self.portals.push((side, ratio, enter)),
+            Ok(Some(UiEvent::File(f))) => self.files.push(f),
             Ok(Some(UiEvent::Notice(_))) => {}
             _ => panic!("tempo esgotado: {what}; último status: {:?}", self.last),
         }
@@ -464,4 +477,83 @@ fn takeover_without_control_is_ignored() {
     e.on_input(InputEvent::Takeover);
     assert!(!fake.blocked());
     assert!(!e.controlled);
+}
+
+#[tokio::test]
+async fn files_cross_the_link_with_progress_and_land_in_downloads() {
+    let (a, mut b) = connected_pair().await;
+    let dir = std::env::temp_dir().join(format!("wf-engine-src-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let big: Vec<u8> = (0..3_000_000u32).map(|i| (i % 253) as u8).collect();
+    let (f1, f2, f3) = (
+        dir.join("grande.bin"),
+        dir.join("vazio.txt"),
+        dir.join("nota.txt"),
+    );
+    std::fs::write(&f1, &big).unwrap();
+    std::fs::write(&f2, b"").unwrap();
+    std::fs::write(&f3, "olá").unwrap();
+
+    a.handle.send(Command::SendFiles {
+        paths: vec![f1, f2, f3, dir.clone()],
+        ratio: 4_200,
+    });
+    // B recebe os três arquivos (a pasta é ignorada); A só observa.
+    loop {
+        if b.files.iter().filter(|f| f.state == "done").count() == 3 {
+            break;
+        }
+        b.pump("arquivos concluídos em B").await;
+    }
+    assert_eq!(std::fs::read(b.downloads.join("grande.bin")).unwrap(), big);
+    assert_eq!(std::fs::read(b.downloads.join("vazio.txt")).unwrap(), b"");
+    assert_eq!(
+        std::fs::read_to_string(b.downloads.join("nota.txt")).unwrap(),
+        "olá"
+    );
+
+    let offers: Vec<_> = b.files.iter().filter(|f| f.state == "offer").collect();
+    assert_eq!(offers.len(), 3);
+    assert!(offers
+        .iter()
+        .all(|f| f.ratio == 4_200 && f.count == 3 && f.side == "left"));
+    assert!(
+        b.files.iter().any(|f| f.state == "progress"),
+        "anel recebe andamento"
+    );
+    let last = b.files.last().unwrap();
+    assert_eq!((last.batch_done, last.batch_bytes), (3_000_004, 3_000_004));
+    assert!(last
+        .path
+        .as_deref()
+        .is_some_and(|p| p.ends_with("nota.txt")));
+    // Nunca sobra arquivo parcial.
+    assert!(std::fs::read_dir(&b.downloads).unwrap().all(|e| !e
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .ends_with(".wfpart")));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&b.downloads);
+}
+
+#[tokio::test]
+async fn holding_the_button_at_the_edge_does_not_take_control() {
+    let (mut a, mut b) = connected_pair().await;
+    a.fake.0.lock().unwrap().button_down = true;
+    a.fake.set(Point { x: 1919, y: 540 });
+    sleep(Duration::from_millis(400)).await;
+    while let Ok(ev) = a.ui.try_recv() {
+        if let UiEvent::Status(s) = ev {
+            assert_ne!(s.state, "remote");
+        }
+    }
+    assert!(!a.fake.capturing());
+    // Soltar o botão ainda encostado na borda também não cruza: precisa se afastar antes.
+    a.fake.0.lock().unwrap().button_down = false;
+    sleep(Duration::from_millis(300)).await;
+    assert!(!a.fake.capturing());
+    a.fake.set(Point { x: 1800, y: 540 });
+    sleep(Duration::from_millis(100)).await;
+    cross(&mut a, &mut b).await;
 }

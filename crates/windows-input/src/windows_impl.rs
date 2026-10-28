@@ -611,6 +611,10 @@ impl Platform for WinPlatform {
         }
     }
 
+    fn primary_button_down(&self) -> bool {
+        primary_button_down()
+    }
+
     fn performance(&mut self, on: bool) {
         if on == self.high_res {
             return;
@@ -741,3 +745,35 @@ pub fn capture_screen_rgba(x: i32, y: i32, w: i32, h: i32) -> Option<Vec<u8>> {
         Some(buf)
     }
 }
+
+/// Botão esquerdo pressionado agora (estado físico do mouse).
+pub fn primary_button_down() -> bool {
+    async_down(VK_LBUTTON.0)
+}
+
+/// Posição atual do cursor, em pixels físicos da tela virtual.
+pub fn cursor_pos() -> Point {
+    let mut p = POINT::default();
+    // SAFETY: `p` é um POINT válido e gravável.
+    let _ = unsafe { GetCursorPos(&mut p) };
+    Point { x: p.x, y: p.y }
+}
+
+/// Área da tela virtual (todos os monitores), em pixels físicos.
+pub fn virtual_screen() -> Rect {
+    // SAFETY: GetSystemMetrics não tem pré-condições de memória.
+    unsafe {
+        let (l, t) = (
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+        );
+        Rect {
+            left: l,
+            top: t,
+            right: l + GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            bottom: t + GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        }
+    }
+}
+
+pub use crate::shell::{downloads_dir, start_file_drag};

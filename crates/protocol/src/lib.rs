@@ -7,11 +7,17 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Versão atual do protocolo. Incrementar em mudanças incompatíveis.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
-/// Tamanho máximo de um frame serializado (64 KiB). Chunks de arquivo terão
-/// limite próprio na fase 5.
+/// Tamanho máximo de um frame serializado (64 KiB). Os chunks de arquivo viajam
+/// em base64 dentro de um frame e por isso são menores ([`MAX_FILE_CHUNK`]).
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
+/// Bytes de arquivo por chunk (antes do base64): 32 KiB viram ~43 KiB no frame.
+pub const MAX_FILE_CHUNK: usize = 32 * 1024;
+/// Tamanho máximo de um arquivo transferido (16 GiB).
+pub const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+/// Arquivos por lote.
+pub const MAX_FILES_PER_BATCH: u32 = 256;
 /// Tamanho máximo de texto de clipboard (1 MiB seria excessivo para o frame; o
 /// clipboard usará canal próprio na fase 4).
 pub const MAX_CLIPBOARD_BYTES: usize = 32 * 1024;
@@ -89,6 +95,32 @@ pub enum Message {
         revision: u64,
         text: String,
     },
+    /// Anuncia um arquivo de um lote. `index` começa em 0; `batch_bytes` é o total do lote
+    /// e `ratio` a posição, na borda de quem envia, por onde o arquivo "atravessa".
+    FileOffer {
+        id: u64,
+        name: String,
+        size: u64,
+        index: u32,
+        count: u32,
+        batch_bytes: u64,
+        ratio: u16,
+    },
+    /// Pedaço do arquivo `id` a partir de `offset` (dados em base64).
+    FileChunk {
+        id: u64,
+        offset: u64,
+        data: String,
+    },
+    /// Confirma o recebimento (e a gravação) dos bytes até `offset`; libera a janela de envio.
+    FileAck {
+        id: u64,
+        offset: u64,
+    },
+    /// Cancela o arquivo `id` (qualquer um dos lados).
+    FileCancel {
+        id: u64,
+    },
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -139,10 +171,117 @@ impl Message {
                     return Err(ProtocolError::InvalidField("text"));
                 }
             }
+            Message::FileOffer {
+                name,
+                size,
+                index,
+                count,
+                batch_bytes,
+                ratio,
+                ..
+            } => {
+                if !is_valid_file_name(name) {
+                    return Err(ProtocolError::InvalidField("name"));
+                }
+                if *size > MAX_FILE_BYTES || *batch_bytes < *size || *batch_bytes > MAX_FILE_BYTES {
+                    return Err(ProtocolError::InvalidField("size"));
+                }
+                if *count == 0 || *count > MAX_FILES_PER_BATCH || index >= count {
+                    return Err(ProtocolError::InvalidField("index"));
+                }
+                if *ratio > MAX_RATIO {
+                    return Err(ProtocolError::InvalidField("ratio"));
+                }
+            }
+            Message::FileChunk { offset, data, .. }
+                if data.len() > base64_len(MAX_FILE_CHUNK) || *offset > MAX_FILE_BYTES =>
+            {
+                return Err(ProtocolError::InvalidField("data"));
+            }
             _ => {}
         }
         Ok(())
     }
+}
+
+/// Nome de arquivo simples: sem separadores, sem `:`, sem caracteres de controle e sem
+/// terminar em ponto/espaço (o Windows os descartaria e mudaria o nome gravado).
+pub fn is_valid_file_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().count() <= 200
+        && name != "."
+        && name != ".."
+        && !name.ends_with(['.', ' '])
+        && !name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|'])
+        && !name.chars().any(char::is_control)
+}
+
+/// Comprimento do base64 (com preenchimento) de `n` bytes.
+pub const fn base64_len(n: usize) -> usize {
+    n.div_ceil(3) * 4
+}
+
+const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+pub fn base64_encode(data: &[u8]) -> String {
+    let mut out = String::with_capacity(base64_len(data.len()));
+    for c in data.chunks(3) {
+        let n = (u32::from(c[0]) << 16)
+            | (u32::from(*c.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*c.get(2).unwrap_or(&0));
+        out.push(B64[(n >> 18) as usize & 63] as char);
+        out.push(B64[(n >> 12) as usize & 63] as char);
+        out.push(if c.len() > 1 {
+            B64[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if c.len() > 2 {
+            B64[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Decodifica base64 padrão com preenchimento; `None` se malformado.
+pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    let b = s.as_bytes();
+    if !b.len().is_multiple_of(4) {
+        return None;
+    }
+    let val = |c: u8| -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some(u32::from(c - b'A')),
+            b'a'..=b'z' => Some(u32::from(c - b'a') + 26),
+            b'0'..=b'9' => Some(u32::from(c - b'0') + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    };
+    let mut out = Vec::with_capacity(b.len() / 4 * 3);
+    for (i, q) in b.chunks(4).enumerate() {
+        let last = (i + 1) * 4 == b.len();
+        let pad = q.iter().rev().take_while(|&&c| c == b'=').count();
+        if pad > 2 || (pad > 0 && !last) {
+            return None;
+        }
+        let mut n = 0u32;
+        for &c in &q[..4 - pad] {
+            n = (n << 6) | val(c)?;
+        }
+        n <<= 6 * pad as u32;
+        out.push((n >> 16) as u8);
+        if pad < 2 {
+            out.push((n >> 8) as u8);
+        }
+        if pad < 1 {
+            out.push(n as u8);
+        }
+    }
+    Some(out)
 }
 
 /// Serializa e confere o limite de tamanho.
@@ -220,6 +359,59 @@ mod tests {
         assert_eq!(encode(&m), Err(ProtocolError::InvalidField("ratio")));
         let ok = Message::ControlReleased { exit: MAX_RATIO };
         assert_eq!(decode(&encode(&ok).unwrap()).unwrap(), ok);
+    }
+
+    #[test]
+    fn base64_roundtrip_and_rejects_garbage() {
+        for n in 0..40usize {
+            let data: Vec<u8> = (0..n).map(|i| (i * 37 + 11) as u8).collect();
+            let enc = base64_encode(&data);
+            assert_eq!(enc.len(), base64_len(n));
+            assert_eq!(base64_decode(&enc).unwrap(), data);
+        }
+        assert_eq!(base64_encode(b"Man"), "TWFu");
+        assert_eq!(base64_encode(b"Ma"), "TWE=");
+        assert!(base64_decode("TWE").is_none());
+        assert!(base64_decode("T=Fu").is_none());
+        assert!(base64_decode("TW!u").is_none());
+    }
+
+    #[test]
+    fn full_chunk_fits_in_a_frame() {
+        let m = Message::FileChunk {
+            id: u64::MAX,
+            offset: MAX_FILE_BYTES,
+            data: base64_encode(&vec![0xAB; MAX_FILE_CHUNK]),
+        };
+        assert_eq!(decode(&encode(&m).unwrap()).unwrap(), m);
+    }
+
+    fn offer(name: &str, size: u64) -> Message {
+        Message::FileOffer {
+            id: 1,
+            name: name.into(),
+            size,
+            index: 0,
+            count: 1,
+            batch_bytes: size,
+            ratio: 5_000,
+        }
+    }
+
+    #[test]
+    fn file_offer_blocks_path_tricks_and_bad_sizes() {
+        for bad in ["", "..", "a/b", "a\\b", "C:x", "x.", "x ", "a|b", "a\nb"] {
+            assert_eq!(
+                offer(bad, 1).validate(),
+                Err(ProtocolError::InvalidField("name")),
+                "{bad:?}"
+            );
+        }
+        assert!(offer("relatório final.pdf", 10).validate().is_ok());
+        assert_eq!(
+            offer("a", MAX_FILE_BYTES + 1).validate(),
+            Err(ProtocolError::InvalidField("size"))
+        );
     }
 
     #[test]

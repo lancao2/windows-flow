@@ -21,11 +21,15 @@ export function Portal({ force2d = false }: { force2d?: boolean }) {
     if (!canvas) return;
 
     let renderer: Renderer | null = null;
-    try {
-      renderer = createRenderer(canvas);
-      report(renderer ? 'ok: WebGL' : 'WebGL indisponível; usando plano B (2D)');
-    } catch (e) {
-      report(`shader falhou: ${String(e)}; usando plano B (2D)`);
+    if (force2d) {
+      report('plano B (2D) forçado');
+    } else {
+      try {
+        renderer = createRenderer(canvas);
+        report(renderer ? 'ok: WebGL' : 'WebGL indisponível; usando plano B (2D)');
+      } catch (e) {
+        report(`shader falhou: ${String(e)}; usando plano B (2D)`);
+      }
     }
     if (!renderer) {
       // Um canvas que já recebeu contexto 'webgl' não aceita '2d': recria o elemento.
@@ -66,7 +70,7 @@ export function Portal({ force2d = false }: { force2d?: boolean }) {
       unlisten?.();
       rend.stop();
     };
-  }, []);
+  }, [force2d]);
 
   return <canvas ref={canvasRef} className="portal-canvas" />;
 }
