@@ -1,0 +1,735 @@
+/* Painel (0.4.0): visual de dashboard, sem rolagem da janela. */
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+body {
+  background: #0a0e18;
+}
+.shell {
+  height: 100vh;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 22px 18px;
+  color: #e8edf5;
+  font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
+  background:
+    radial-gradient(900px 520px at 8% -10%, rgba(99, 72, 190, 0.38), transparent 60%),
+    radial-gradient(800px 520px at 100% 110%, rgba(40, 110, 200, 0.3), transparent 60%),
+    linear-gradient(180deg, #0c1120, #0a0e18);
+}
+.shell * {
+  box-sizing: border-box;
+}
+
+/* Barra superior */
+.topbar {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  min-height: 46px;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 700;
+  font-size: 17px;
+  letter-spacing: 0.2px;
+}
+.navpill {
+  display: flex;
+  gap: 4px;
+  padding: 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.navpill button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 18px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #aeb9c9;
+  font:
+    600 13px 'Segoe UI Variable Text',
+    'Segoe UI',
+    sans-serif;
+  cursor: pointer;
+  transition:
+    background 160ms,
+    color 160ms;
+}
+.navpill button:hover:not(.on) {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.07);
+}
+.navpill button.on {
+  background: #fff;
+  color: #0d1320;
+}
+.top-right {
+  justify-self: end;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.ver {
+  color: #6f7b90;
+  font-size: 12px;
+}
+
+/* Conteúdo */
+.content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+}
+.title-row h1 {
+  margin: 0;
+  font-size: 34px;
+  letter-spacing: -0.5px;
+}
+.grid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  gap: 14px;
+}
+.home {
+  grid-template-columns: 1.7fr 1fr 1.05fr;
+  grid-template-rows: 172px minmax(0, 1fr);
+  grid-template-areas:
+    'hero stats side'
+    'map act side';
+}
+.g-hero {
+  grid-area: hero;
+  min-height: 0;
+}
+.g-stats {
+  grid-area: stats;
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+  gap: 14px;
+  min-height: 0;
+}
+.g-map {
+  grid-area: map;
+  min-height: 0;
+}
+.g-act {
+  grid-area: act;
+  min-height: 0;
+}
+.g-side {
+  grid-area: side;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+}
+.g-hero > .card,
+.g-map > .card,
+.g-act > .card {
+  height: 100%;
+}
+.two {
+  grid-template-columns: 1fr 1fr;
+  align-content: start;
+}
+.three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-content: start;
+}
+
+/* Cartões */
+.shell .card {
+  position: relative;
+  margin: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: 16px 18px;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.25);
+}
+.card-h {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.shell .card-h h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 14.5px;
+  font-weight: 600;
+}
+.card-h h2 svg {
+  color: #7fb4ff;
+}
+.computers {
+  flex: 1;
+}
+
+/* Cartão principal em degradê */
+.shell .hero {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  color: #07170f;
+  border: 0;
+  background: linear-gradient(130deg, #5eead4 0%, #86efac 48%, #d9f99d 100%);
+}
+.hero-art {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 62%;
+  height: 100%;
+  pointer-events: none;
+}
+.hero-top,
+.hero-title,
+.hero-sub,
+.hero-actions {
+  position: relative;
+}
+.hero-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.hero-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 14px;
+}
+.hero-chip {
+  padding: 3px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.55);
+  font-size: 12px;
+  font-weight: 600;
+}
+.hero-title {
+  margin-top: 4px;
+  font-size: 40px;
+  font-weight: 700;
+  letter-spacing: -1px;
+  line-height: 1.05;
+}
+.hero-sub {
+  font-size: 13px;
+  opacity: 0.75;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hero-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* Botões */
+.shell .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 9px 16px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.09);
+  color: #fff;
+  font:
+    600 13px 'Segoe UI Variable Text',
+    'Segoe UI',
+    sans-serif;
+  cursor: pointer;
+  transition:
+    background 150ms,
+    transform 150ms;
+}
+.shell .btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.16);
+  transform: translateY(-1px);
+}
+.shell .btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.shell .btn.primary {
+  border-color: transparent;
+  background: linear-gradient(135deg, #3b82f6, #6366f1);
+}
+.shell .btn.primary:hover:not(:disabled) {
+  background: linear-gradient(135deg, #4f8ff8, #7578f3);
+}
+.shell .btn.danger {
+  border-color: transparent;
+  background: #dc2f3f;
+}
+.shell .btn.dark {
+  border-color: transparent;
+  background: #090d17;
+  color: #fff;
+}
+.shell .btn.light {
+  border-color: transparent;
+  background: rgba(255, 255, 255, 0.62);
+  color: #07170f;
+}
+.shell .btn.light:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.85);
+}
+.shell .btn.ghost {
+  background: transparent;
+}
+.shell .btn.mini {
+  padding: 5px 12px;
+  font-size: 12px;
+}
+.shell .btn.icon {
+  padding: 6px;
+}
+.shell .btn.wide {
+  width: 100%;
+  margin-top: 12px;
+}
+
+/* Cartões de estatística */
+.shell .stat {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 16px;
+}
+.stat > div {
+  min-width: 0;
+}
+.stat-label {
+  display: block;
+  color: #8e9bb0;
+  font-size: 12px;
+}
+.stat-value {
+  display: block;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.4px;
+  white-space: nowrap;
+}
+.stat-value small {
+  color: #8e9bb0;
+  font-size: 12px;
+  font-weight: 400;
+}
+.stat small {
+  display: block;
+  color: #7a879b;
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mono {
+  font-family: Consolas, monospace;
+  font-size: 19px;
+}
+.stat-ic {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 14px;
+}
+.stat-ic.blue {
+  background: rgba(59, 130, 246, 0.2);
+  color: #8ab8ff;
+}
+
+/* Linhas de lista (estilo "assinaturas") */
+.plist {
+  display: grid;
+  gap: 8px;
+}
+.row-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.055);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+.row-item.dim {
+  opacity: 0.75;
+}
+.ri-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.09);
+  color: #cfd8e6;
+}
+.ri-icon.grad {
+  background: linear-gradient(135deg, #3b82f6, #22d3ee);
+  color: #fff;
+}
+.ri-icon.grad2 {
+  background: linear-gradient(135deg, #8b5cf6, #ec4899);
+  color: #fff;
+}
+.ri-icon.warn {
+  background: rgba(245, 158, 11, 0.2);
+  color: #fbbf24;
+}
+.ri-text {
+  flex: 1;
+  min-width: 0;
+}
+.ri-text b {
+  display: block;
+  font-size: 13.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ri-text small {
+  display: block;
+  color: #8190a6;
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chip {
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #cbd5e3;
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.chip.ok {
+  background: rgba(163, 230, 53, 0.18);
+  color: #bef264;
+}
+
+/* Atividade */
+.alist {
+  display: grid;
+  gap: 2px;
+}
+.act {
+  display: grid;
+  grid-template-columns: 10px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  font-size: 12.5px;
+}
+.act-msg {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.act time {
+  color: #7a879b;
+  font-size: 11.5px;
+}
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #6b7683;
+}
+.dot.ok {
+  background: #a3e635;
+}
+.dot.bad {
+  background: #f87171;
+}
+.dot.info {
+  background: #60a5fa;
+}
+
+/* Vazio */
+.empty {
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  padding: 14px 8px;
+  text-align: center;
+  color: #8e9bb0;
+}
+.empty b {
+  color: #e8edf5;
+  font-size: 13.5px;
+}
+.empty small {
+  font-size: 11.5px;
+}
+.radar {
+  display: grid;
+  place-items: center;
+  width: 58px;
+  height: 58px;
+  margin-bottom: 4px;
+  border-radius: 50%;
+  color: #7fb4ff;
+  background: radial-gradient(circle, rgba(127, 180, 255, 0.22), transparent 70%);
+  animation: radar-pulse 2.4s ease-in-out infinite;
+}
+@keyframes radar-pulse {
+  50% {
+    transform: scale(1.1);
+    opacity: 0.75;
+  }
+}
+
+/* Formulários */
+.seg {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+}
+.seg button {
+  flex: 1;
+  padding: 8px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #9aa7bb;
+  font:
+    600 13px 'Segoe UI Variable Text',
+    'Segoe UI',
+    sans-serif;
+  cursor: pointer;
+}
+.seg button.on {
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+}
+.pane {
+  margin-top: 12px;
+}
+.pane > p:first-child {
+  margin-top: 0;
+}
+.inline {
+  display: flex;
+  gap: 8px;
+}
+.shell input[type='text'],
+.shell .inline input {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.25);
+  color: #fff;
+  font:
+    13px 'Segoe UI Variable Text',
+    'Segoe UI',
+    sans-serif;
+}
+.shell .inline input:focus {
+  outline: 2px solid rgba(99, 102, 241, 0.6);
+}
+.shell .ipbox {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 10px 0 12px;
+  padding: 12px 16px;
+  border-radius: 18px;
+  background: rgba(0, 0, 0, 0.25);
+}
+.shell .big-ip {
+  font:
+    700 26px Consolas,
+    monospace;
+  color: #7fd1ff;
+}
+.ok-text {
+  color: #86efac;
+}
+.tiny {
+  font-size: 11.5px;
+  margin: 4px 0 0;
+}
+.center {
+  text-align: center;
+}
+
+/* Interruptor */
+.switch-row {
+  cursor: pointer;
+}
+.shell input.switch {
+  flex: none;
+  appearance: none;
+  position: relative;
+  width: 40px;
+  min-width: 40px;
+  height: 22px;
+  margin: 0;
+  padding: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.2);
+  transition: background 160ms;
+  cursor: pointer;
+}
+.shell input.switch::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  transition: left 160ms;
+}
+.shell input.switch:checked {
+  background: #3b82f6;
+}
+.shell input.switch:checked::after {
+  left: 21px;
+}
+
+/* Aviso de controle */
+.shell .banner {
+  position: static;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  padding: 8px 14px;
+  border-radius: 16px;
+  background: rgba(245, 158, 11, 0.16);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  color: #fcd34d;
+}
+.banner strong {
+  flex: 1;
+  font-size: 13px;
+}
+
+/* Diálogo do código */
+.shell .modal {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: grid;
+  place-items: center;
+  background: rgba(4, 7, 14, 0.72);
+  backdrop-filter: blur(6px);
+}
+.shell .dialog {
+  width: 440px;
+  max-width: calc(100vw - 40px);
+  padding: 22px 24px;
+  border-radius: 26px;
+  background: #141a2b;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+}
+.dlg-ic {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  margin-bottom: 10px;
+  border-radius: 16px;
+  background: linear-gradient(135deg, #3b82f6, #22d3ee);
+  color: #fff;
+}
+.shell .dialog h2 {
+  margin: 0 0 6px;
+  font-size: 18px;
+}
+.dlg-actions {
+  display: flex;
+  gap: 10px;
+}
+.dlg-actions .btn {
+  flex: 1;
+}
+
+/* Mapa das telas combinando com o painel */
+.shell .pm-stage {
+  margin: 0 auto;
+}
+.shell .pm-tile {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+.shell .pm-me {
+  background: rgba(94, 234, 212, 0.09);
+  border-color: rgba(94, 234, 212, 0.4);
+}
+.shell .pm-slot {
+  border-color: rgba(255, 255, 255, 0.18);
+}
+.shell .pm-peer {
+  background: rgba(99, 102, 241, 0.2);
+  border-color: rgba(129, 140, 248, 0.6);
+}
+
+.mono {
+  font-size: 16px;
+}
+.stat-ic {
+  width: 34px;
+  height: 34px;
+  border-radius: 12px;
+}
+.home {
+  grid-template-rows: 164px minmax(0, 1fr);
+}
+
+.plist {
+  grid-template-columns: minmax(0, 1fr);
+}
+.alist {
+  grid-template-columns: minmax(0, 1fr);
+}
+.ri-text {
+  overflow: hidden;
+}

@@ -216,62 +216,6 @@ body.xfer-body {
   letter-spacing: -0.2px;
 }
 
-/* Ondas estilo AirDrop, centradas no círculo do balão. */
-.xf-ripples {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-.xf-ripple,
-.xf-glow {
-  position: absolute;
-  left: 20px;
-  top: 20px;
-  width: 80px;
-  height: 80px;
-  border-radius: 50%;
-}
-.xf-ripple {
-  border: 2px solid rgba(140, 190, 255, 0.9);
-  box-shadow:
-    0 0 26px rgba(90, 150, 255, 0.5),
-    inset 0 0 18px rgba(90, 150, 255, 0.28);
-  opacity: 0;
-  animation: xf-ripple 1.35s cubic-bezier(0.15, 0.6, 0.3, 1) both;
-}
-.xf-glow {
-  left: -20px;
-  top: -20px;
-  width: 160px;
-  height: 160px;
-  background: radial-gradient(circle, rgba(110, 165, 255, 0.55) 0%, rgba(110, 165, 255, 0) 68%);
-  opacity: 0;
-  animation: xf-glow 1.2s ease-out both;
-}
-@keyframes xf-ripple {
-  0% {
-    transform: scale(0.55);
-    opacity: 0.95;
-  }
-  100% {
-    transform: scale(4.6);
-    opacity: 0;
-  }
-}
-@keyframes xf-glow {
-  0% {
-    transform: scale(0.6);
-    opacity: 0;
-  }
-  25% {
-    opacity: 1;
-  }
-  100% {
-    transform: scale(2.6);
-    opacity: 0;
-  }
-}
-
 /* Envio: o balão nasce da borda, pulsa ao completar e voa para dentro da borda. */
 .xf-grow {
   animation: xf-grow 260ms cubic-bezier(0.2, 0.9, 0.3, 1.15) both;
@@ -281,8 +225,8 @@ body.xfer-body {
 }
 .xf-commit {
   animation:
-    xf-pulse 480ms ease-in-out both,
-    xf-launch 560ms cubic-bezier(0.5, 0, 0.9, 0.4) 620ms forwards;
+    xf-pulse 300ms ease-in-out both,
+    xf-launch 300ms cubic-bezier(0.5, 0, 0.9, 0.4) 300ms forwards;
 }
 @keyframes xf-grow {
   from {
@@ -459,10 +403,6 @@ button.xf-x:hover:not(:disabled) {
   font-size: 11px;
 }
 @media (prefers-reduced-motion: reduce) {
-  .xf-ripple,
-  .xf-glow {
-    animation-duration: 0.01ms;
-  }
   .xf-tray,
   .xf-grow,
   .xf-arrive {
@@ -505,4 +445,441 @@ button.xf-x {
 }
 .xf-rows::-webkit-scrollbar {
   display: none;
+}
+
+.xf-rows {
+  overflow: visible;
+}
+.xf-msg {
+  margin: 0;
+  padding: 9px 26px 0 14px;
+  color: #aab4c2;
+  font-size: 11.5px;
+  line-height: 1.3;
+}
+
+/* Versão compacta (0.3.1) */
+.xf-tray {
+  border-radius: 12px;
+}
+.xf-msg {
+  padding: 8px 22px 0 10px;
+  font-size: 10.5px;
+  line-height: 1.3;
+}
+.xf-rows {
+  padding: 2px 4px;
+}
+.xf-row {
+  height: 36px;
+  margin: 4px 0;
+  padding: 0 8px;
+  gap: 8px;
+  border-radius: 9px;
+}
+.xf-name {
+  font-size: 11.5px;
+}
+.xf-size {
+  font-size: 10.5px;
+}
+.xf-bar {
+  margin-top: 5px;
+}
+button.xf-x {
+  top: 3px;
+  right: 3px;
+  font-size: 10px;
+}
+
+/* ---- Janela principal (0.3.5): mais amigável ------------------------------------------------ */
+.app {
+  padding: 22px 26px 40px;
+}
+.top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+.top h1 {
+  margin: 0;
+  font-size: 24px;
+}
+.card h2 {
+  margin: 0 0 10px;
+  font-size: 15px;
+  letter-spacing: 0.2px;
+}
+.card {
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  padding: 16px 18px;
+}
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+  background: #1c2630;
+}
+.pill i {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #6b7683;
+}
+.pill-ok i {
+  background: #3ddc84;
+  box-shadow: 0 0 8px #3ddc84;
+}
+.pill-wait i {
+  background: #ffb74d;
+  animation: pill-blink 1.1s ease-in-out infinite;
+}
+@keyframes pill-blink {
+  50% {
+    opacity: 0.3;
+  }
+}
+.ok-text {
+  color: #3ddc84;
+}
+.tabs {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 10px;
+  background: #0f151b;
+}
+.tabs button {
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: #8a96a3;
+}
+.tabs button.on {
+  background: #22303c;
+  color: #fff;
+}
+.pane {
+  margin-top: 12px;
+}
+.pane > p:first-child {
+  margin-top: 0;
+}
+.ipbox {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  margin: 10px 0 12px;
+  border-radius: 10px;
+  background: #0f151b;
+}
+.big-ip {
+  font:
+    600 26px Consolas,
+    monospace;
+  color: #6cc4ff;
+}
+button.wide {
+  width: 100%;
+  padding: 11px;
+}
+.center {
+  text-align: center;
+}
+.tips ul {
+  margin: 0;
+  padding-left: 18px;
+  line-height: 1.6;
+}
+kbd {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #22303c;
+  border: 1px solid #33414f;
+  font-size: 12px;
+}
+.adv summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.adv[open] summary {
+  margin-bottom: 10px;
+}
+
+/* Mapa dos PCs (arrastar e soltar) */
+.pm-stage {
+  position: relative;
+  margin: 14px auto 4px;
+  max-width: 100%;
+  touch-action: none;
+  user-select: none;
+}
+.pm-slot,
+.pm-tile {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+}
+.pm-slot {
+  width: 112px;
+  height: 72px;
+  margin: -36px 0 0 -56px;
+  padding: 0;
+  border: 2px dashed rgba(255, 255, 255, 0.16);
+  border-radius: 12px;
+  background: transparent;
+  transition:
+    border-color 120ms,
+    background 120ms;
+}
+.pm-slot-top,
+.pm-slot-bottom {
+  height: 52px;
+  margin-top: -26px;
+}
+.pm-slot:hover:not(:disabled) {
+  border-color: rgba(108, 196, 255, 0.55);
+}
+.pm-hot {
+  border-color: #6cc4ff !important;
+  background: rgba(108, 196, 255, 0.14) !important;
+}
+.pm-current {
+  border-color: transparent;
+}
+.pm-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  width: 112px;
+  height: 72px;
+  margin: -36px 0 0 -56px;
+  border-radius: 12px;
+  background: #22303c;
+  border: 2px solid #33414f;
+  font-size: 12px;
+  text-align: center;
+  overflow: hidden;
+}
+.pm-tile span {
+  max-width: 100px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #8a96a3;
+  font-size: 11px;
+}
+.pm-screen {
+  width: 34px;
+  height: 20px;
+  margin-bottom: 3px;
+  border-radius: 3px;
+  background: linear-gradient(135deg, #3b82f6, #6cc4ff);
+}
+.pm-me {
+  width: 140px;
+  height: 90px;
+  margin: -45px 0 0 -70px;
+  background: #1a2733;
+  border-color: #2f4558;
+}
+.pm-me .pm-screen {
+  width: 44px;
+  height: 26px;
+}
+.pm-edge-right {
+  border-right-color: #6cc4ff;
+  box-shadow: 6px 0 14px -6px #6cc4ff;
+}
+.pm-edge-left {
+  border-left-color: #6cc4ff;
+  box-shadow: -6px 0 14px -6px #6cc4ff;
+}
+.pm-edge-top {
+  border-top-color: #6cc4ff;
+  box-shadow: 0 -6px 14px -6px #6cc4ff;
+}
+.pm-edge-bottom {
+  border-bottom-color: #6cc4ff;
+  box-shadow: 0 6px 14px -6px #6cc4ff;
+}
+.pm-peer {
+  z-index: 2;
+  cursor: grab;
+  transition: transform 220ms cubic-bezier(0.2, 0.9, 0.3, 1.1);
+}
+.pm-peer .pm-screen {
+  background: linear-gradient(135deg, #8a96a3, #5b6773);
+}
+.pm-peer.pm-on .pm-screen {
+  background: linear-gradient(135deg, #34d399, #3ddc84);
+}
+.pm-dragging {
+  cursor: grabbing;
+  transition: none;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.5);
+  border-color: #6cc4ff;
+}
+.pm-locked .pm-peer {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.pm-stage,
+.pm-stage * {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Descoberta e notificação (0.3.6) */
+.found {
+  margin: 12px 0 4px;
+}
+.peer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  border-radius: 10px;
+  background: #0f151b;
+  border: 1px solid rgba(108, 196, 255, 0.25);
+}
+.searching {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0;
+}
+.searching i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #6cc4ff;
+  animation: pill-blink 1.1s ease-in-out infinite;
+}
+.opts {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+.toast {
+  display: flex;
+  gap: 12px;
+  margin: 10px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: #2b2b2e;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  color: #f2f4f7;
+  font:
+    13px 'Segoe UI',
+    sans-serif;
+  animation: toast-in 380ms cubic-bezier(0.2, 0.9, 0.25, 1.1) both;
+}
+@keyframes toast-in {
+  from {
+    transform: translateY(30px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+.toast-icon {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #3b82f6, #6cc4ff);
+}
+.toast-icon i {
+  width: 16px;
+  height: 10px;
+  border-radius: 2px;
+  border: 2px solid #fff;
+}
+.toast-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.toast-body b {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+}
+.toast-body span {
+  color: #9aa4b2;
+  font-size: 12px;
+}
+.toast-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.toast-actions button {
+  padding: 5px 12px;
+  font-size: 12px;
+}
+
+.remember {
+  display: block;
+  margin: 0 0 14px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: #c9d3de;
+}
+.toast-check {
+  display: block;
+  margin-top: 6px;
+  color: #c9d3de;
+  font-size: 11.5px;
+}
+.toast-check input {
+  vertical-align: middle;
+}
+
+input[type='checkbox'] {
+  flex: none;
+  min-width: 0;
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  margin: 0 6px 0 0;
+  vertical-align: middle;
+  accent-color: #3b82f6;
+}
+
+/* Botão "abrir local" da bandeja */
+button.xf-loc {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #dbe3ee;
+}
+button.xf-loc:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.22);
+  color: #fff;
 }

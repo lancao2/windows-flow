@@ -35,3 +35,9 @@ export function looksLikePeerAddress(input: string): boolean {
   const port = m[5] === undefined ? 1 : Number(m[5]);
   return octets.every((o) => o <= 255) && port >= 1 && port <= 65535;
 }
+
+/** Lado (em relação ao centro) mais próximo de um deslocamento: o eixo dominante decide. */
+export function nearestSide(dx: number, dy: number): Side {
+  if (Math.abs(dx) * 0.7 >= Math.abs(dy)) return dx >= 0 ? 'right' : 'left';
+  return dy >= 0 ? 'bottom' : 'top';
+}

@@ -11,19 +11,35 @@ use std::time::{Duration, Instant};
 
 use continuity_core::engine::{Command, FileEvent};
 use serde::Serialize;
-use tauri::{
-    AppHandle, DragDropEvent, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder, Window,
+use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use windows_input::windows_impl::{
+    cursor_pos, primary_button_down, virtual_screen, DropCatcher, DropEvent,
 };
-use windows_input::windows_impl::{cursor_pos, primary_button_down, virtual_screen};
 use windows_input::Point;
 
-use super::{place_overlay, App};
+use super::{place_overlay, qa_log, show_portal, App};
+
+/// `--xfer-qa=left|top|bottom`: borda de teste (padrão: direita).
+fn qa_side() -> Option<&'static str> {
+    std::env::args().find_map(|a| match a.as_str() {
+        "--xfer-qa=left" => Some("left"),
+        "--xfer-qa=top" => Some("top"),
+        "--xfer-qa=bottom" => Some("bottom"),
+        _ => None,
+    })
+}
+
+/// `--xfer-qa`: finge que há um par conectado para testar o arrastar sem dois PCs.
+fn qa() -> bool {
+    static QA: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *QA.get_or_init(|| std::env::args().any(|a| a.starts_with("--xfer-qa")))
+}
 
 pub const SEND: &str = "xfer-send";
 pub const RECV: &str = "xfer-recv";
 
 /// Tamanho lógico (px CSS) das janelas do anel e da animação.
-const BUBBLE_WIN: (i32, i32) = (400, 400);
+const BUBBLE_WIN: (i32, i32) = (260, 260);
 /// Distância (px físicos) da borda a partir da qual a janela de captura aparece.
 const ARM_DIST: i32 = 150;
 /// Distância máxima da borda para o anel contar o tempo: "encostado na extremidade".
@@ -35,6 +51,13 @@ const COMMIT_MS: u64 = 1_700;
 /// Pressão do botão por esse número de ciclos antes de mostrar a janela (ignora cliques).
 const ARM_TICKS: u32 = 4;
 const MAX_TRAY: usize = 8;
+/// Atraso do efeito de portal em relação ao anel completo (o balão some antes da captura).
+const PORTAL_DELAY_MS: u64 = 380;
+/// Atraso da animação de chegada em relação à oferta (depois da saída no outro PC).
+const ARRIVE_DELAY_MS: u64 = 900;
+/// Faixa nativa que recebe o arrasto, rente à borda (px físicos).
+const CATCH_DEPTH: i32 = 96;
+const CATCH_SPAN: i32 = 360;
 
 #[derive(Clone, Copy)]
 struct Anchor {
@@ -65,6 +88,8 @@ pub struct Xfer {
     anchors: HashMap<&'static str, Anchor>,
     hold: Hold,
     tray: Vec<TrayItem>,
+    /// Janela nativa que recebe os arquivos arrastados até a borda.
+    catcher: Option<DropCatcher>,
 }
 
 #[derive(Serialize, Clone)]
@@ -202,6 +227,15 @@ fn place(app: &AppHandle, label: &str, lw: i32, lh: i32, interactive: bool) -> O
 }
 
 fn hide(app: &AppHandle, label: &str) {
+    if label == SEND {
+        if let Some(st) = app.try_state::<App>() {
+            if let Ok(x) = st.xfer.lock() {
+                if let Some(c) = &x.catcher {
+                    c.hide();
+                }
+            }
+        }
+    }
     if let Some(w) = app.get_webview_window(label) {
         let _ = w.hide();
         let _ = w.set_ignore_cursor_events(true);
@@ -209,11 +243,11 @@ fn hide(app: &AppHandle, label: &str) {
 }
 
 pub fn create_windows(app: &tauri::App) -> tauri::Result<()> {
-    for (label, url, drops) in [
-        (SEND, "index.html#xfer-send", true),
-        (RECV, "index.html#xfer-recv", false),
+    for (label, url) in [
+        (SEND, "index.html#xfer-send"),
+        (RECV, "index.html#xfer-recv"),
     ] {
-        let mut b = WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.into()))
+        let b = WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.into()))
             .title("Windows Flow Transferência")
             .decorations(false)
             .transparent(true)
@@ -223,24 +257,37 @@ pub fn create_windows(app: &tauri::App) -> tauri::Result<()> {
             .resizable(false)
             .focused(false)
             .focusable(false)
-            .visible(false);
-        if !drops {
-            b = b.disable_drag_drop_handler();
-        }
+            .visible(false)
+            .disable_drag_drop_handler();
         let win = b.build()?;
         win.set_ignore_cursor_events(true)?;
+    }
+    let handle = app.handle().clone();
+    match DropCatcher::new(move |ev| on_drop(&handle, ev)) {
+        Ok(c) => {
+            if let Some(st) = app.try_state::<App>() {
+                if let Ok(mut x) = st.xfer.lock() {
+                    x.catcher = Some(c);
+                }
+            }
+        }
+        Err(e) => qa_log(&format!("xfer-send: janela de captura indisponível: {e}")),
     }
     Ok(())
 }
 
 // ---- envio ----------------------------------------------------------------
 
-/// Eventos de arrastar-e-soltar da janela de captura: guardam os arquivos que entraram nela.
-pub fn on_drag_drop(window: &Window, ev: &DragDropEvent) {
-    if window.label() != SEND {
-        return;
-    }
-    let app = window.app_handle();
+/// Eventos do arrastar da janela nativa de captura: guardam os arquivos que entraram nela.
+fn on_drop(app: &AppHandle, ev: DropEvent) {
+    qa_log(&format!(
+        "xfer-send dragdrop: {}",
+        match &ev {
+            DropEvent::Enter(p) => format!("enter {} arquivo(s)", p.len()),
+            DropEvent::Drop => "drop".into(),
+            DropEvent::Leave => "leave".into(),
+        }
+    ));
     let Some(st) = app.try_state::<App>() else {
         return;
     };
@@ -248,23 +295,39 @@ pub fn on_drag_drop(window: &Window, ev: &DragDropEvent) {
         return;
     };
     match ev {
-        DragDropEvent::Enter { paths, .. } if !paths.is_empty() => {
+        DropEvent::Enter(paths) => {
             x.hold = Hold {
-                paths: paths.clone(),
+                paths,
                 entered: true,
                 started: None,
                 committed: false,
             };
         }
-        DragDropEvent::Drop { .. } | DragDropEvent::Leave => {
-            // Soltar antes do anel completar (ou sair da janela) cancela o envio.
+        DropEvent::Drop | DropEvent::Leave => {
+            // Soltar antes do anel completar (ou sair da faixa) cancela o envio.
             if !x.hold.committed {
                 x.hold = Hold::default();
             } else {
                 x.hold.entered = false;
             }
         }
-        _ => {}
+    }
+}
+
+/// Retângulo físico (x, y, w, h) da faixa de captura rente à borda, centrada em `center`.
+fn catch_rect(side: &str, center: i32, s: [i32; 4]) -> (i32, i32, i32, i32) {
+    let [l, t, r, b] = s;
+    match side {
+        "left" | "right" => {
+            let y = (center - CATCH_SPAN / 2).clamp(t, (b - CATCH_SPAN).max(t));
+            let x = if side == "left" { l } else { r - CATCH_DEPTH };
+            (x, y, CATCH_DEPTH, CATCH_SPAN)
+        }
+        _ => {
+            let x = (center - CATCH_SPAN / 2).clamp(l, (r - CATCH_SPAN).max(l));
+            let y = if side == "top" { t } else { b - CATCH_DEPTH };
+            (x, y, CATCH_SPAN, CATCH_DEPTH)
+        }
     }
 }
 
@@ -305,10 +368,12 @@ fn send_tick(app: &AppHandle, phase: &mut Phase, armed: &mut u32) {
         return;
     };
     let status = st.status.lock().ok().and_then(|s| s.clone());
-    let usable = status
-        .as_ref()
-        .is_some_and(|s| s.link == "connected" && s.state == "local" && !s.controlled);
-    let side = status.as_ref().map_or("right", |s| s.peer_side);
+    let usable = qa()
+        || status
+            .as_ref()
+            // Também vale com este PC sendo controlado: o mouse do outro PC pode arrastar daqui.
+            .is_some_and(|s| s.link == "connected" && s.state == "local");
+    let side = qa_side().unwrap_or_else(|| status.as_ref().map_or("right", |s| s.peer_side));
     let down = primary_button_down();
     let cur = cursor_pos();
     let r = virtual_screen();
@@ -327,7 +392,14 @@ fn send_tick(app: &AppHandle, phase: &mut Phase, armed: &mut u32) {
                     x.hold = Hold::default();
                 }
                 set_anchor(app, SEND, side, along(cur, side), screen);
-                let pl = place(app, SEND, BUBBLE_WIN.0, BUBBLE_WIN.1, true);
+                qa_log(&format!("xfer-send: janela de captura (dist={dist})"));
+                let pl = place(app, SEND, BUBBLE_WIN.0, BUBBLE_WIN.1, false);
+                if let Ok(x) = st.xfer.lock() {
+                    if let Some(c) = &x.catcher {
+                        let (cx, cy, cw, ch) = catch_rect(side, along(cur, side), screen);
+                        c.place(cx, cy, cw, ch);
+                    }
+                }
                 emit_send(app, "catch", 0.0, pl, 0);
                 *phase = Phase::Catch;
             }
@@ -373,7 +445,18 @@ fn send_tick(app: &AppHandle, phase: &mut Phase, armed: &mut u32) {
                 emit_send(app, kind, p, None, v);
             }
             if let Some((paths, ratio)) = commit {
+                qa_log(&format!(
+                    "xfer-send: anel completo, {} arquivo(s)",
+                    paths.len()
+                ));
                 st.engine.send(Command::SendFiles { paths, ratio });
+                // Mesma animação de quando o mouse sai de uma tela: o balão some e a borda
+                // ondula (a chegada toca no outro PC logo depois).
+                let h = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(PORTAL_DELAY_MS)).await;
+                    show_portal(&h, side, ratio, false, screen);
+                });
                 *phase = Phase::Commit(Instant::now() + Duration::from_millis(COMMIT_MS));
             }
         }
@@ -413,10 +496,17 @@ pub fn on_file_event(app: &AppHandle, f: FileEvent) {
             let side: &'static str = f.side;
             set_anchor(app, RECV, side, c, f.screen);
             placement = place(app, RECV, BUBBLE_WIN.0, BUBBLE_WIN.1, false);
+            let (h, side, ratio, screen) = (app.clone(), f.side, f.ratio, f.screen);
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(ARRIVE_DELAY_MS)).await;
+                show_portal(&h, side, ratio, true, screen);
+            });
         }
     }
-    if f.state == "done" {
-        if let (Some(p), Ok(mut x)) = (&f.path, st.xfer.lock()) {
+    // A bandeja tem um item por raiz: o arquivo avulso ou a pasta inteira (no último arquivo).
+    if f.state == "done" && f.root_last {
+        if let (Some(p), Ok(mut x)) = (&f.root_path, st.xfer.lock()) {
+            x.tray.retain(|t| t.id != f.id);
             x.tray.push(TrayItem {
                 id: f.id,
                 path: PathBuf::from(p),
@@ -531,6 +621,11 @@ pub fn run_preview(app: AppHandle) {
             side: "left",
             screen,
             path: (state == "done").then(|| file.to_string_lossy().into_owned()),
+            root: "relatorio-final.pdf".into(),
+            root_path: (state == "done").then(|| file.to_string_lossy().into_owned()),
+            root_bytes: size,
+            root_last: state == "done",
+            is_dir: false,
         };
         on_file_event(&app, ev("offer", 0));
         for i in 1..=20u64 {
@@ -539,4 +634,34 @@ pub fn run_preview(app: AppHandle) {
         }
         on_file_event(&app, ev("done", size));
     });
+}
+
+fn tray_path(state: &App, id: u64) -> Option<PathBuf> {
+    state
+        .xfer
+        .lock()
+        .ok()
+        .and_then(|x| x.tray.iter().find(|t| t.id == id).map(|t| t.path.clone()))
+}
+
+/// Duplo clique na bandeja: abre o arquivo (ou a pasta) com o programa padrão.
+#[tauri::command]
+pub fn xfer_open(state: State<'_, App>, id: u64) -> bool {
+    let path = tray_path(&state, id);
+    let ok = path
+        .as_ref()
+        .is_some_and(|p| windows_input::windows_impl::open_path(p));
+    qa_log(&format!("bandeja: abrir id={id} -> {ok} ({path:?})"));
+    ok
+}
+
+/// Abre o Explorer na pasta do item, com ele selecionado.
+#[tauri::command]
+pub fn xfer_reveal(state: State<'_, App>, id: u64) -> bool {
+    let path = tray_path(&state, id);
+    let ok = path
+        .as_ref()
+        .is_some_and(|p| windows_input::windows_impl::reveal_path(p));
+    qa_log(&format!("bandeja: abrir local id={id} -> {ok} ({path:?})"));
+    ok
 }

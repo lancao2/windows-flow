@@ -776,4 +776,6 @@ pub fn virtual_screen() -> Rect {
     }
 }
 
-pub use crate::shell::{downloads_dir, start_file_drag};
+pub use crate::shell::{
+    downloads_dir, open_path, reveal_path, start_file_drag, DropCatcher, DropEvent,
+};

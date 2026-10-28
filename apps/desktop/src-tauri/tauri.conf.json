@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Windows Flow",
-  "version": "0.3.0",
+  "version": "0.5.0",
   "identifier": "br.ind.natuhair.windowsflow",
   "build": {
     "beforeDevCommand": "npm run vite",
@@ -10,7 +10,17 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{ "title": "Windows Flow", "width": 800, "height": 560, "visible": true }],
+    "windows": [
+      {
+        "title": "Windows Flow",
+        "width": 1040,
+        "height": 680,
+        "minWidth": 980,
+        "minHeight": 640,
+        "center": true,
+        "visible": true
+      }
+    ],
     "security": {
       "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'"
     }

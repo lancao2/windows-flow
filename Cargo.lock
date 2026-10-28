@@ -381,7 +381,7 @@ dependencies = [
 
 [[package]]
 name = "clipboard-sync"
-version = "0.2.1"
+version = "0.5.0"
 
 [[package]]
 name = "combine"
@@ -401,8 +401,9 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "continuity-core"
-version = "0.2.1"
+version = "0.5.0"
 dependencies = [
+ "file-transfer",
  "protocol",
  "serde",
  "tokio",
@@ -720,7 +721,13 @@ dependencies = [
 
 [[package]]
 name = "discovery"
-version = "0.2.1"
+version = "0.5.0"
+dependencies = [
+ "if-addrs",
+ "serde",
+ "serde_json",
+ "tokio",
+]
 
 [[package]]
 name = "dispatch2"
@@ -883,7 +890,10 @@ dependencies = [
 
 [[package]]
 name = "file-transfer"
-version = "0.2.1"
+version = "0.5.0"
+dependencies = [
+ "protocol",
+]
 
 [[package]]
 name = "find-msvc-tools"
@@ -1585,6 +1595,16 @@ checksum = "cb68373c0d6620ef8105e855e7745e18b0d00d3bdb07fb532e434244cdb9a714"
 dependencies = [
  "icu_normalizer",
  "icu_properties",
+]
+
+[[package]]
+name = "if-addrs"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0a05c691e1fae256cf7013d99dad472dc52d5543322761f83ec8d47eab40d2b"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2544,7 +2564,7 @@ dependencies = [
 
 [[package]]
 name = "protocol"
-version = "0.2.1"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3857,7 +3877,7 @@ dependencies = [
 
 [[package]]
 name = "transport"
-version = "0.2.1"
+version = "0.5.0"
 dependencies = [
  "protocol",
  "rcgen",
@@ -4297,14 +4317,17 @@ dependencies = [
 
 [[package]]
 name = "windows-flow"
-version = "0.2.1"
+version = "0.5.0"
 dependencies = [
  "continuity-core",
+ "discovery",
  "protocol",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tokio",
+ "transport",
  "windows-input",
 ]
 
@@ -4332,11 +4355,12 @@ dependencies = [
 
 [[package]]
 name = "windows-input"
-version = "0.2.1"
+version = "0.5.0"
 dependencies = [
  "protocol",
  "tokio",
  "windows",
+ "windows-core",
 ]
 
 [[package]]

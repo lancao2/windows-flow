@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 use windows_input::windows_impl::WinPlatform;
 use windows_input::Side;
 
+mod auto;
 mod xfer;
 
 const DEFAULT_PORT: u16 = 47_800;
@@ -34,6 +35,7 @@ struct App {
     /// Último estado informado pelo overlay (WebGL ok, plano B, erro de shader...).
     portal_health: Mutex<String>,
     xfer: Mutex<xfer::Xfer>,
+    auto: auto::Auto,
 }
 
 #[derive(Serialize, Clone)]
@@ -46,16 +48,13 @@ struct PortalPayload {
     v0: i32,
 }
 
-#[derive(Serialize, Clone)]
-struct ConfirmPayload {
-    sas: String,
-    peer: String,
-}
-
 #[derive(Serialize)]
 struct Info {
     device_name: String,
+    version: &'static str,
     local_ip: Option<String>,
+    /// Outros endereços da LAN deste PC (placas virtuais/VPN), para o caso de o principal não servir.
+    other_ips: Vec<String>,
     default_port: u16,
     hotkey_registered: bool,
     portal_health: String,
@@ -65,7 +64,17 @@ struct Info {
 fn get_info(app: State<'_, App>) -> Info {
     Info {
         device_name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "este-pc".into()),
+        version: env!("CARGO_PKG_VERSION"),
         local_ip: local_ip().map(|ip| ip.to_string()),
+        other_ips: {
+            let main = local_ip();
+            discovery::lan_ipv4s()
+                .into_iter()
+                .map(|a| a.ip)
+                .filter(|ip| Some(IpAddr::V4(*ip)) != main)
+                .map(|ip| ip.to_string())
+                .collect()
+        },
         default_port: DEFAULT_PORT,
         hotkey_registered: app.hotkey_registered,
         portal_health: app
@@ -83,6 +92,7 @@ fn get_status(app: State<'_, App>) -> Option<Status> {
 
 #[tauri::command]
 fn host(app: State<'_, App>, port: Option<u16>) {
+    app.auto.resume();
     let addr = SocketAddr::new(
         IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         port.unwrap_or(DEFAULT_PORT),
@@ -93,24 +103,40 @@ fn host(app: State<'_, App>, port: Option<u16>) {
 #[tauri::command]
 fn connect(app: State<'_, App>, addr: String) -> Result<(), String> {
     let addr = parse_peer(&addr)?;
+    app.auto.resume();
     app.engine.send(Command::Connect(addr));
     Ok(())
 }
 
 #[tauri::command]
-fn confirm(app: State<'_, App>, accept: bool) {
-    app.engine.send(Command::Confirm(accept));
+fn confirm(app: State<'_, App>, accept: bool, remember: Option<bool>) {
+    app.engine.send(Command::Confirm {
+        accept,
+        remember: remember.unwrap_or(false),
+    });
 }
 
 #[tauri::command]
 fn disconnect(app: State<'_, App>) {
+    // Desconexão manual: não reconecta sozinho até o usuário conectar de novo.
+    app.auto.pause();
     app.engine.send(Command::Disconnect);
 }
 
 #[tauri::command]
-fn set_peer_side(app: State<'_, App>, side: String) -> Result<(), String> {
-    let side = Side::parse(&side).ok_or("lado inválido")?;
-    app.engine.send(Command::SetPeerSide(side));
+fn set_peer_side(handle: AppHandle, app: State<'_, App>, side: String) -> Result<(), String> {
+    let parsed = Side::parse(&side).ok_or("lado inválido")?;
+    // A posição só muda (e só é guardada para este computador) fora do controle remoto.
+    let can_change = app
+        .status
+        .lock()
+        .ok()
+        .and_then(|s| s.as_ref().map(|s| s.state != "remote" && !s.controlled))
+        .unwrap_or(true);
+    app.engine.send(Command::SetPeerSide(parsed));
+    if can_change {
+        app.auto.save_side(&handle, &side);
+    }
     Ok(())
 }
 
@@ -127,9 +153,7 @@ fn parse_peer(s: &str) -> Result<SocketAddr, String> {
 
 /// IP local da interface de saída (UDP "conectado" não envia nenhum pacote).
 fn local_ip() -> Option<IpAddr> {
-    let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
-    sock.connect("192.168.255.255:9").ok()?;
-    Some(sock.local_addr().ok()?.ip())
+    discovery::primary_ipv4().map(IpAddr::V4)
 }
 
 fn forward_events(app: AppHandle, mut rx: mpsc::UnboundedReceiver<UiEvent>) {
@@ -141,11 +165,14 @@ fn forward_events(app: AppHandle, mut rx: mpsc::UnboundedReceiver<UiEvent>) {
                         if let Ok(mut g) = state.status.lock() {
                             *g = Some(s.clone());
                         }
+                        if s.link == "connected" {
+                            state.auto.on_connected(&app, s.peer.as_deref());
+                        }
                     }
                     let _ = app.emit("engine-status", s);
                 }
                 UiEvent::Confirm { sas, peer } => {
-                    let _ = app.emit("engine-confirm", ConfirmPayload { sas, peer });
+                    let _ = app.emit("engine-confirm", auto::confirm_payload(&app, sas, peer));
                     show_main_window(&app);
                 }
                 UiEvent::Notice(msg) => {
@@ -158,6 +185,12 @@ fn forward_events(app: AppHandle, mut rx: mpsc::UnboundedReceiver<UiEvent>) {
                     screen,
                 } => show_portal(&app, side, ratio, enter, screen),
                 UiEvent::File(f) => xfer::on_file_event(&app, f),
+                UiEvent::PeerHello {
+                    name,
+                    fingerprint,
+                    remembered,
+                    ..
+                } => auto::on_peer_hello(&app, name, fingerprint, remembered),
             }
         }
     });
@@ -391,17 +424,24 @@ pub fn run() {
             xfer::xfer_layout,
             xfer::xfer_hide,
             xfer::xfer_dismiss,
-            xfer::xfer_drag
+            xfer::xfer_drag,
+            xfer::xfer_open,
+            xfer::xfer_reveal,
+            auto::get_settings,
+            auto::get_peers,
+            auto::get_discovery,
+            auto::forget_known,
+            auto::set_visible,
+            auto::set_auto_connect,
+            auto::forget_last_peer,
+            auto::connect_peer,
+            auto::toast_dismiss
         ])
         .on_window_event(|window, event| {
             // Fechar a janela mantém o app na bandeja; "Sair" encerra de verdade.
-            match event {
-                WindowEvent::CloseRequested { api, .. } => {
-                    api.prevent_close();
-                    let _ = window.hide();
-                }
-                WindowEvent::DragDrop(e) => xfer::on_drag_drop(window, e),
-                _ => {}
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
             }
         })
         .setup(|app| {
@@ -412,8 +452,19 @@ pub fn run() {
             let (ui_tx, ui_rx) = mpsc::unbounded_channel();
             let mut config = EngineConfig::new(device, Side::Right);
             config.download_dir = windows_input::windows_impl::downloads_dir();
-            let (engine, handle) = Engine::new(platform, input_rx, config, ui_tx)?;
+            let config_dir = app
+                .path()
+                .app_config_dir()
+                .unwrap_or_else(|_| std::env::temp_dir());
+            let (mut engine, handle) = Engine::new(platform, input_rx, config, ui_tx)?;
 
+            // Identidade fixa: é o que permite reconhecer computadores confiáveis depois.
+            match transport::tls::Identity::load_or_create(&config_dir.join("identity.bin")) {
+                Ok(id) => engine.set_identity(id),
+                Err(e) => qa_log(&format!("identidade fixa indisponível: {e}")),
+            }
+            let auto_state = auto::Auto::load(config_dir.join("settings.json"));
+            handle.send(Command::SetTrusted(auto_state.trusted_fps()));
             app.manage(App {
                 engine: handle,
                 status: Mutex::new(None),
@@ -423,7 +474,13 @@ pub fn run() {
                 snapshot: Mutex::new(Vec::new()),
                 portal_health: Mutex::new("aguardando o overlay iniciar".into()),
                 xfer: Mutex::new(xfer::Xfer::default()),
+                auto: auto_state,
             });
+            auto::create_toast_window(app)?;
+            auto::start_keeper(app.handle().clone());
+            if app.state::<App>().auto.settings().visible {
+                auto::start_discovery(app.handle());
+            }
             create_portal_window(app)?;
             xfer::create_windows(app)?;
             xfer::start_watcher(app.handle().clone());

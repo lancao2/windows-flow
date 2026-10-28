@@ -1,6 +1,6 @@
 # Guia de teste da Fase 1 (dois PCs)
 
-Instaladores: `target\release\bundle\nsis\Windows Flow_0.2.2_x64-setup.exe` (gerar com `npm run build`).
+Instaladores: `target\release\bundle\nsis\Windows Flow_0.5.0_x64-setup.exe` (gerar com `npm run build`).
 Rede: os dois PCs na mesma LAN. Ao escutar pela primeira vez, o Windows pede acesso no Firewall: permitir **somente rede privada**.
 
 ## Antes de começar

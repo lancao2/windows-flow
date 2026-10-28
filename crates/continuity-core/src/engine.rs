@@ -5,14 +5,14 @@
 //! - Só se captura/suprime entrada em REMOTE; qualquer falha chama [`Engine::recover`].
 //! - Só se injeta entrada vinda do par enquanto este PC concedeu o controle.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use file_transfer::{Incoming, Outgoing};
+use file_transfer::{create_unique_dir, disk_name, plan, Incoming, Outgoing};
 use protocol::{
     base64_decode, base64_encode, Message, MAX_FILES_PER_BATCH, MAX_FILE_CHUNK, MAX_POINTER_DELTA,
     NONCE_LEN, PROTOCOL_VERSION,
@@ -74,7 +74,13 @@ pub enum Command {
     /// Conecta a um par que está escutando.
     Connect(SocketAddr),
     /// Resposta do usuário ao código de verificação.
-    Confirm(bool),
+    Confirm {
+        accept: bool,
+        /// Confiar neste computador: nas próximas conexões não pede o código de novo.
+        remember: bool,
+    },
+    /// Substitui a lista de computadores confiáveis (impressões digitais).
+    SetTrusted(Vec<[u8; 32]>),
     /// Encerra a conexão e esquece a confiança no par.
     Disconnect,
     SetPeerSide(Side),
@@ -107,6 +113,15 @@ pub struct FileEvent {
     pub screen: [i32; 4],
     /// Caminho final do arquivo recebido (só em `done`).
     pub path: Option<String>,
+    /// Item raiz a que o arquivo pertence: o arquivo avulso ou a pasta inteira.
+    pub root: String,
+    /// Caminho final do item raiz (só em `done`; a pasta ou o arquivo).
+    pub root_path: Option<String>,
+    pub root_bytes: u64,
+    /// Este foi o último arquivo do item raiz (só em `done`).
+    pub root_last: bool,
+    /// O item raiz é uma pasta.
+    pub is_dir: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -140,6 +155,15 @@ pub enum UiEvent {
         screen: [i32; 4],
     },
     File(FileEvent),
+    /// O par completou a conexão: nome do computador e se ele é (ou acabou de ser) confiável.
+    PeerHello {
+        name: String,
+        /// Impressão digital (hex) do certificado do par.
+        fingerprint: String,
+        trusted: bool,
+        /// O usuário acabou de marcar "lembrar este computador".
+        remembered: bool,
+    },
 }
 
 #[derive(Clone)]
@@ -189,6 +213,12 @@ struct InBatch {
     done: u64,
     ratio: u16,
     index: u32,
+    /// Item raiz do arquivo atual.
+    root: String,
+    root_bytes: u64,
+    root_last: bool,
+    /// Pasta de destino real (com sufixo se já existia), quando o item raiz é uma pasta.
+    root_dir: Option<PathBuf>,
 }
 
 /// Cópia dos números do lote para montar um [`FileEvent`].
@@ -197,6 +227,10 @@ struct InBatchView {
     bytes: u64,
     done: u64,
     ratio: u16,
+    root: String,
+    root_bytes: u64,
+    root_last: bool,
+    root_dir: Option<PathBuf>,
 }
 
 impl InBatch {
@@ -206,6 +240,10 @@ impl InBatch {
             bytes: self.bytes,
             done: self.done,
             ratio: self.ratio,
+            root: self.root.clone(),
+            root_bytes: self.root_bytes,
+            root_last: self.root_last,
+            root_dir: self.root_dir.clone(),
         }
     }
 }
@@ -221,6 +259,9 @@ pub struct Engine<P: Platform> {
     edge: EdgeDetector,
     ret: ReturnDetector,
     identity: Arc<Identity>,
+    trusted: HashSet<[u8; 32]>,
+    peer_fp: Option<[u8; 32]>,
+    remember_pending: bool,
     pinned: Pinned,
     busy: Arc<AtomicBool>,
     ui: UnboundedSender<UiEvent>,
@@ -248,6 +289,8 @@ pub struct Engine<P: Platform> {
     outgoing: Option<Outgoing>,
     out_id: u64,
     in_batch: Option<InBatch>,
+    /// Pastas raiz já criadas neste lote: nome anunciado -> pasta real em Downloads.
+    in_roots: HashMap<String, PathBuf>,
     incoming: Option<Incoming>,
     last_acked: u64,
     last_progress: Instant,
@@ -269,6 +312,9 @@ impl<P: Platform + 'static> Engine<P> {
             cfg,
             fsm: State::Local,
             identity: Arc::new(Identity::generate()?),
+            trusted: HashSet::new(),
+            peer_fp: None,
+            remember_pending: false,
             pinned: Arc::new(Mutex::new(None)),
             busy: Arc::new(AtomicBool::new(false)),
             ui,
@@ -296,11 +342,17 @@ impl<P: Platform + 'static> Engine<P> {
             outgoing: None,
             out_id: 0,
             in_batch: None,
+            in_roots: HashMap::new(),
             incoming: None,
             last_acked: 0,
             last_progress: Instant::now(),
         };
         Ok((engine, EngineHandle { tx: cmd_tx }))
+    }
+
+    /// Usa uma identidade fixa (lida do disco) em vez da efêmera; chamar antes de [`Engine::run`].
+    pub fn set_identity(&mut self, identity: Identity) {
+        self.identity = Arc::new(identity);
     }
 
     pub async fn run(mut self) {
@@ -455,6 +507,7 @@ impl<P: Platform + 'static> Engine<P> {
     }
 
     fn drop_link(&mut self) {
+        self.peer_fp = None;
         self.abort_transfers(false);
         self.p.performance(false);
         self.link = None;
@@ -498,11 +551,16 @@ impl<P: Platform + 'static> Engine<P> {
                 self.mode = Mode::Client(tokio::spawn(client_task(addr, id, pinned, busy, tx)));
                 self.emit_status();
             }
-            Command::Confirm(accept) => {
+            Command::SetTrusted(list) => self.trusted = list.into_iter().collect(),
+            Command::Confirm { accept, remember } => {
                 if let Some((chan, _)) = self.pending.take() {
                     if accept {
                         *self.pinned.lock().unwrap_or_else(|e| e.into_inner()) =
                             Some(chan.peer_fingerprint);
+                        if remember {
+                            self.trusted.insert(chan.peer_fingerprint);
+                            self.remember_pending = true;
+                        }
                         self.start_session(chan);
                     } else {
                         self.busy.store(self.link.is_some(), Ordering::Relaxed);
@@ -553,6 +611,11 @@ impl<P: Platform + 'static> Engine<P> {
                 SessionEvent::Message(m) => self.on_message(m),
                 SessionEvent::Closed(reason) => {
                     self.recover(&format!("conexão encerrada ({reason:?})"));
+                    if reason == transport::session::CloseReason::Protocol {
+                        self.notice(
+                            "Os dois PCs precisam estar na mesma versão do Windows Flow (veja                              a versão no topo do app). Atualize o outro PC.",
+                        );
+                    }
                     self.drop_link();
                 }
             },
@@ -561,8 +624,9 @@ impl<P: Platform + 'static> Engine<P> {
     }
 
     fn on_incoming(&mut self, chan: SecureChannel) {
-        if chan.pinned_match {
-            // Par já confirmado nesta execução: reconexão automática.
+        if chan.pinned_match || self.trusted.contains(&chan.peer_fingerprint) {
+            // Par já confirmado (nesta execução ou salvo como confiável): sem pedir o código.
+            *self.pinned.lock().unwrap_or_else(|e| e.into_inner()) = Some(chan.peer_fingerprint);
             if self.link.is_some() {
                 self.recover("reconexão do par");
                 self.drop_link();
@@ -584,6 +648,7 @@ impl<P: Platform + 'static> Engine<P> {
 
     fn start_session(&mut self, chan: SecureChannel) {
         let peer = chan.peer_addr;
+        self.peer_fp = Some(chan.peer_fingerprint);
         let hello = Message::Hello {
             protocol_version: PROTOCOL_VERSION,
             device_id: self.cfg.device_id.clone(),
@@ -614,9 +679,17 @@ impl<P: Platform + 'static> Engine<P> {
 
     fn on_message(&mut self, m: Message) {
         match m {
-            Message::Hello { .. } => {
+            Message::Hello { device_id, .. } => {
                 if let Some(l) = self.link.as_mut() {
                     l.ready = true;
+                }
+                if let Some(fp) = self.peer_fp {
+                    let _ = self.ui.send(UiEvent::PeerHello {
+                        name: device_id,
+                        fingerprint: fp.iter().map(|b| format!("{b:02x}")).collect(),
+                        trusted: self.trusted.contains(&fp),
+                        remembered: std::mem::take(&mut self.remember_pending),
+                    });
                 }
                 self.p.performance(true);
                 self.notice("Conectado ao outro PC.");
@@ -671,12 +744,26 @@ impl<P: Platform + 'static> Engine<P> {
             Message::FileOffer {
                 id,
                 name,
+                rel,
                 size,
                 index,
                 count,
                 batch_bytes,
+                root_bytes,
+                root_last,
                 ratio,
-            } => self.on_file_offer(id, name, size, index, count, batch_bytes, ratio),
+            } => self.on_file_offer(
+                id,
+                name,
+                rel,
+                size,
+                index,
+                count,
+                batch_bytes,
+                root_bytes,
+                root_last,
+                ratio,
+            ),
             Message::FileChunk { id, offset, data } => self.on_file_chunk(id, offset, &data),
             Message::FileAck { id, offset } => self.on_file_ack(id, offset),
             Message::FileCancel { id } => self.on_file_cancel(id),
@@ -747,7 +834,11 @@ impl<P: Platform + 'static> Engine<P> {
             y: cur.y + dy,
         });
         self.p.move_cursor(target);
-        if self.ret.update(target, screen, dx, dy) {
+        // Arrastando arquivos (botão pressionado): encostar na borda não devolve o controle,
+        // senão o anel de 2 s nunca completaria.
+        if self.p.primary_button_down() {
+            self.ret.reset();
+        } else if self.ret.update(target, screen, dx, dy) {
             let exit = ratio_along(target, screen, self.cfg.peer_side);
             self.end_control();
             self.send(Message::ControlReleased { exit });
@@ -847,6 +938,18 @@ impl<P: Platform + 'static> Engine<P> {
             ratio: b.ratio,
             side: side_str(self.cfg.peer_side),
             screen: [s.left, s.top, s.right, s.bottom],
+            root: b.root.clone(),
+            root_path: (state == "done")
+                .then(|| {
+                    b.root_dir
+                        .as_ref()
+                        .map(|d| d.to_string_lossy().into_owned())
+                        .or_else(|| path.clone())
+                })
+                .flatten(),
+            root_bytes: b.root_bytes,
+            root_last: state == "done" && b.root_last,
+            is_dir: b.root_dir.is_some(),
             path,
         }));
     }
@@ -864,12 +967,7 @@ impl<P: Platform + 'static> Engine<P> {
                 self.send(Message::FileCancel { id: i.id });
             }
             if let Some(b) = &self.in_batch {
-                let view = InBatchView {
-                    count: b.count,
-                    bytes: b.bytes,
-                    done: b.done,
-                    ratio: b.ratio,
-                };
+                let view = b.view();
                 self.emit_file(
                     "in",
                     "failed",
@@ -880,6 +978,7 @@ impl<P: Platform + 'static> Engine<P> {
             }
         }
         self.in_batch = None;
+        self.in_roots.clear();
     }
 
     fn start_send(&mut self, paths: Vec<PathBuf>, ratio: u16) {
@@ -891,19 +990,20 @@ impl<P: Platform + 'static> Engine<P> {
             self.notice("Já existe um envio em andamento.");
             return;
         }
-        let mut queue = VecDeque::new();
-        let mut skipped = 0;
-        for p in paths.into_iter().take(MAX_FILES_PER_BATCH as usize) {
-            self.out_id += 1;
-            match Outgoing::open(self.out_id, &p) {
-                Ok(o) => queue.push_back(o),
-                Err(_) => skipped += 1,
-            }
-        }
-        if skipped > 0 {
+        let plan = plan(&paths);
+        if plan.skipped > 0 {
             self.notice(format!(
-                "{skipped} item(ns) ignorado(s): só arquivos comuns são enviados (pastas não)."
+                "{} item(ns) ignorado(s): atalhos, links e nomes inválidos não são enviados.",
+                plan.skipped
             ));
+        }
+        if plan.empty_folders > 0 {
+            self.notice("Pasta vazia: não há arquivos para enviar.");
+        }
+        let mut queue = VecDeque::new();
+        for e in plan.entries.iter().take(MAX_FILES_PER_BATCH as usize) {
+            self.out_id += 1;
+            queue.push_back(Outgoing::from_entry(self.out_id, e));
         }
         if queue.is_empty() {
             return;
@@ -933,10 +1033,13 @@ impl<P: Platform + 'static> Engine<P> {
         let offer = Message::FileOffer {
             id: o.id,
             name: o.name.clone(),
+            rel: o.rel.clone(),
             size: o.size,
             index,
             count: b.count,
             batch_bytes: b.bytes,
+            root_bytes: o.root_bytes,
+            root_last: o.root_last,
             ratio: b.ratio,
         };
         self.outgoing = Some(o);
@@ -1021,15 +1124,21 @@ impl<P: Platform + 'static> Engine<P> {
         &mut self,
         id: u64,
         name: String,
+        rel: String,
         size: u64,
         index: u32,
         count: u32,
         batch_bytes: u64,
+        root_bytes: u64,
+        root_last: bool,
         ratio: u16,
     ) {
         // Só aceita arquivos com a sessão pronta (o Hello do par já passou).
         if !self.link_ready() {
             return;
+        }
+        if index == 0 {
+            self.in_roots.clear();
         }
         // Oferta nova: descarta o recebimento anterior. Um lote novo (índice 0) recomeça a
         // contagem; no meio de um lote, mantém o que já chegou.
@@ -1039,7 +1148,38 @@ impl<P: Platform + 'static> Engine<P> {
             self.in_batch.as_ref().map_or(0, |b| b.done)
         };
         self.incoming = None;
-        let inc = match Incoming::create(&self.cfg.download_dir, id, &name, size) {
+        // Destino: Downloads (arquivo avulso) ou dentro da pasta raiz recriada, com as
+        // subpastas do caminho relativo (a pasta raiz ganha "(1)" se o nome já existe).
+        let parts: Vec<&str> = rel.split('/').collect();
+        let downloads = self.cfg.download_dir.clone();
+        let (dir, root_dir) = if parts.len() <= 1 {
+            (downloads, None)
+        } else {
+            let root = parts[0].to_string();
+            let actual = match self.in_roots.get(&root) {
+                Some(p) => Ok(p.clone()),
+                None => create_unique_dir(&downloads, &root).inspect(|p| {
+                    self.in_roots.insert(root.clone(), p.clone());
+                }),
+            };
+            let made = actual.and_then(|actual| {
+                let mut d = actual.clone();
+                for c in &parts[1..parts.len() - 1] {
+                    d.push(disk_name(c));
+                }
+                std::fs::create_dir_all(&d).map(|()| (d, Some(actual)))
+            });
+            match made {
+                Ok(x) => x,
+                Err(e) => {
+                    self.send(Message::FileCancel { id });
+                    self.in_batch = None;
+                    self.notice(format!("Não foi possível criar a pasta de \"{rel}\": {e}"));
+                    return;
+                }
+            }
+        };
+        let inc = match Incoming::create(&dir, id, &name, size) {
             Ok(i) => i,
             Err(e) => {
                 self.send(Message::FileCancel { id });
@@ -1048,12 +1188,23 @@ impl<P: Platform + 'static> Engine<P> {
                 return;
             }
         };
+        let root_name = match &root_dir {
+            Some(d) => d.file_name().map_or_else(
+                || parts[0].to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            ),
+            None => inc.name.clone(),
+        };
         let batch = InBatch {
             count,
             bytes: batch_bytes,
             done: prev_done,
             ratio,
             index,
+            root: root_name,
+            root_bytes,
+            root_last,
+            root_dir,
         };
         self.last_acked = 0;
         self.last_progress = Instant::now();

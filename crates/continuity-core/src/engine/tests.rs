@@ -92,6 +92,8 @@ async fn eventually(what: &str, f: impl Fn() -> bool) {
     panic!("tempo esgotado: {what}");
 }
 
+static NODE_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 struct Node {
     fake: FakePlatform,
     input: UnboundedSender<InputEvent>,
@@ -101,6 +103,7 @@ struct Node {
     sas: Option<String>,
     portals: Vec<(&'static str, u16, bool)>,
     files: Vec<FileEvent>,
+    hellos: Vec<(String, bool)>,
     downloads: std::path::PathBuf,
 }
 
@@ -110,8 +113,11 @@ impl Node {
         let (input, input_rx) = mpsc::unbounded_channel();
         let (ui_tx, ui) = mpsc::unbounded_channel();
         let mut cfg = EngineConfig::new(name, side);
-        let downloads =
-            std::env::temp_dir().join(format!("wf-engine-{name}-{}", std::process::id()));
+        let downloads = std::env::temp_dir().join(format!(
+            "wf-engine-{name}-{}-{}",
+            std::process::id(),
+            NODE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         let _ = std::fs::remove_dir_all(&downloads);
         cfg.download_dir = downloads.clone();
         let (engine, handle) = Engine::new(fake.clone(), input_rx, cfg, ui_tx).unwrap();
@@ -125,6 +131,7 @@ impl Node {
             sas: None,
             portals: vec![],
             files: vec![],
+            hellos: vec![],
             downloads,
         }
     }
@@ -137,6 +144,9 @@ impl Node {
                 side, ratio, enter, ..
             })) => self.portals.push((side, ratio, enter)),
             Ok(Some(UiEvent::File(f))) => self.files.push(f),
+            Ok(Some(UiEvent::PeerHello {
+                name, remembered, ..
+            })) => self.hellos.push((name, remembered)),
             Ok(Some(UiEvent::Notice(_))) => {}
             _ => panic!("tempo esgotado: {what}; último status: {:?}", self.last),
         }
@@ -161,6 +171,13 @@ impl Node {
     }
 }
 
+fn confirm(accept: bool) -> Command {
+    Command::Confirm {
+        accept,
+        remember: false,
+    }
+}
+
 async fn connected_pair() -> (Node, Node) {
     let mut a = Node::new("pc-a", Side::Right);
     let mut b = Node::new("pc-b", Side::Left);
@@ -172,8 +189,8 @@ async fn connected_pair() -> (Node, Node) {
 
     let (sas_a, sas_b) = (a.wait_sas().await, b.wait_sas().await);
     assert_eq!(sas_a, sas_b, "os dois PCs devem exibir o mesmo código");
-    a.handle.send(Command::Confirm(true));
-    b.handle.send(Command::Confirm(true));
+    a.handle.send(confirm(true));
+    b.handle.send(confirm(true));
     a.wait_status("A conectado", |s| s.link == "connected")
         .await;
     b.wait_status("B conectado", |s| s.link == "connected")
@@ -205,8 +222,8 @@ async fn rejecting_the_code_does_not_connect() {
         .send(Command::Connect(l.listening.unwrap().parse().unwrap()));
     a.wait_sas().await;
     b.wait_sas().await;
-    a.handle.send(Command::Confirm(false));
-    b.handle.send(Command::Confirm(true));
+    a.handle.send(confirm(false));
+    b.handle.send(confirm(true));
     // B inicia a sessão, mas A nunca a inicia: B não chega a "connected".
     sleep(Duration::from_millis(500)).await;
     while let Ok(ev) = a.ui.try_recv() {
@@ -495,10 +512,10 @@ async fn files_cross_the_link_with_progress_and_land_in_downloads() {
     std::fs::write(&f3, "olá").unwrap();
 
     a.handle.send(Command::SendFiles {
-        paths: vec![f1, f2, f3, dir.clone()],
+        paths: vec![f1, f2, f3],
         ratio: 4_200,
     });
-    // B recebe os três arquivos (a pasta é ignorada); A só observa.
+    // B recebe os três arquivos; A só observa.
     loop {
         if b.files.iter().filter(|f| f.state == "done").count() == 3 {
             break;
@@ -556,4 +573,148 @@ async fn holding_the_button_at_the_edge_does_not_take_control() {
     a.fake.set(Point { x: 1800, y: 540 });
     sleep(Duration::from_millis(100)).await;
     cross(&mut a, &mut b).await;
+}
+
+#[tokio::test]
+async fn screens_can_be_switched_while_a_transfer_is_running() {
+    let (mut a, mut b) = connected_pair().await;
+    let dir = std::env::temp_dir().join(format!("wf-engine-free-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("grande.bin");
+    std::fs::write(&f, vec![7u8; 24_000_000]).unwrap();
+    a.handle.send(Command::SendFiles {
+        paths: vec![f],
+        ratio: 5_000,
+    });
+    // Sem o botão pressionado, encostar na borda cruza mesmo com a transferência em curso.
+    cross(&mut a, &mut b).await;
+    assert!(a.fake.capturing());
+    loop {
+        if b.files.iter().any(|f| f.state == "done") {
+            break;
+        }
+        b.pump("transferência concluída").await;
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&b.downloads);
+}
+
+#[tokio::test]
+async fn folders_are_recreated_with_their_tree_and_become_one_root_item() {
+    let (a, mut b) = connected_pair().await;
+    let dir = std::env::temp_dir().join(format!("wf-engine-tree-{}", std::process::id()));
+    let root = dir.join("Projeto");
+    std::fs::create_dir_all(root.join("src/sub")).unwrap();
+    std::fs::write(root.join("leia.txt"), "oi").unwrap();
+    std::fs::write(root.join("src/main.rs"), vec![1u8; 100_000]).unwrap();
+    std::fs::write(root.join("src/sub/vazio.txt"), b"").unwrap();
+    let loose = dir.join("solto.txt");
+    std::fs::write(&loose, "x").unwrap();
+    // A pasta já existe no destino: a nova ganha "(1)" e nada é sobrescrito.
+    std::fs::create_dir_all(b.downloads.join("Projeto")).unwrap();
+    std::fs::write(b.downloads.join("Projeto/antigo.txt"), "intacto").unwrap();
+
+    a.handle.send(Command::SendFiles {
+        paths: vec![root, loose],
+        ratio: 3_000,
+    });
+    loop {
+        if b.files.iter().filter(|f| f.state == "done").count() == 4 {
+            break;
+        }
+        b.pump("pasta concluída em B").await;
+    }
+    let got = b.downloads.join("Projeto (1)");
+    assert_eq!(std::fs::read_to_string(got.join("leia.txt")).unwrap(), "oi");
+    assert_eq!(
+        std::fs::read(got.join("src/main.rs")).unwrap().len(),
+        100_000
+    );
+    assert!(got.join("src/sub/vazio.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(b.downloads.join("Projeto/antigo.txt")).unwrap(),
+        "intacto"
+    );
+
+    // A bandeja recebe um item por raiz: a pasta (uma vez) e o arquivo avulso.
+    let roots: Vec<_> = b
+        .files
+        .iter()
+        .filter(|f| f.state == "done" && f.root_last)
+        .collect();
+    assert_eq!(roots.len(), 2);
+    assert_eq!(roots[0].root, "Projeto (1)");
+    assert!(roots[0].is_dir && roots[0].root_bytes == 100_002);
+    assert_eq!(
+        roots[0].root_path.as_deref(),
+        Some(got.to_string_lossy().as_ref())
+    );
+    assert_eq!(roots[1].root, "solto.txt");
+    assert!(!roots[1].is_dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&b.downloads);
+}
+
+#[tokio::test]
+async fn controlled_pc_keeps_control_while_dragging_at_its_edge() {
+    let (mut a, mut b) = connected_pair().await;
+    cross(&mut a, &mut b).await;
+    // Com o botão pressionado em B (arrastando arquivo), empurrar contra a borda não devolve.
+    b.fake.0.lock().unwrap().button_down = true;
+    a.input.send(InputEvent::Move { dx: -80, dy: 0 }).unwrap();
+    sleep(Duration::from_millis(300)).await;
+    assert!(a.fake.capturing(), "A continua controlando B");
+    // Soltou: um novo empurrão devolve o controle normalmente.
+    b.fake.0.lock().unwrap().button_down = false;
+    a.input.send(InputEvent::Move { dx: -60, dy: 0 }).unwrap();
+    a.wait_status("A volta a LOCAL", |s| s.state == "local")
+        .await;
+}
+
+#[tokio::test]
+async fn remembered_computer_reconnects_without_asking_for_the_code_again() {
+    let mut a = Node::new("pc-a", Side::Right);
+    let mut b = Node::new("pc-b", Side::Left);
+    a.handle.send(Command::Host("127.0.0.1:0".parse().unwrap()));
+    let listening = a.wait_status("escutando", |s| s.listening.is_some()).await;
+    let addr: SocketAddr = listening.listening.unwrap().parse().unwrap();
+    b.handle.send(Command::Connect(addr));
+    a.wait_sas().await;
+    b.wait_sas().await;
+    let remember = |accept| Command::Confirm {
+        accept,
+        remember: true,
+    };
+    a.handle.send(remember(true));
+    b.handle.send(remember(true));
+    a.wait_status("A conectado", |s| s.link == "connected")
+        .await;
+    b.wait_status("B conectado", |s| s.link == "connected")
+        .await;
+    // Cada lado soube o nome do outro e que acabou de lembrá-lo.
+    while a.hellos.is_empty() {
+        a.pump("hello de A").await;
+    }
+    while b.hellos.is_empty() {
+        b.pump("hello de B").await;
+    }
+    assert_eq!(a.hellos[0], ("pc-b".to_string(), true));
+    assert_eq!(b.hellos[0], ("pc-a".to_string(), true));
+
+    // Desconectar e conectar de novo: nenhum código é pedido.
+    b.handle.send(Command::Disconnect);
+    b.wait_status("B ocioso", |s| s.link == "idle").await;
+    a.sas = None;
+    b.sas = None;
+    b.handle.send(Command::Connect(addr));
+    a.wait_status("A reconectado", |s| {
+        s.link == "connected" && s.peer.is_some()
+    })
+    .await;
+    b.wait_status("B reconectado", |s| s.link == "connected")
+        .await;
+    assert!(
+        a.sas.is_none() && b.sas.is_none(),
+        "não deve pedir o código"
+    );
 }

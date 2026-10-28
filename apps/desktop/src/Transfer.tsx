@@ -2,8 +2,10 @@ import { useEffect, useReducer, useRef, useState, type ReactNode } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import type { Side, XferPlacement, XferRecvEvent, XferSendEvent } from '@windows-flow/shared-types';
 import { xfer } from './api';
+import { IconFolder } from './Icons';
 import {
   ARRIVE_DELAY_MS,
+  BUBBLE_SCALE,
   MIN_RING_MS,
   RING_C,
   RING_R,
@@ -16,23 +18,12 @@ import {
 } from './xferLogic';
 
 /** Largura (px CSS) da bandeja de arquivos recebidos e altura de cada linha. */
-const TRAY_W = 264;
-const ROW_H = 52;
+const TRAY_W = 244;
+const ROW_H = 44;
 const MAX_ROWS = 3;
 
 // Balão com a ponta virada para a borda: círculo r=52 em (60,60) e ponta em (137,60).
 const SHAPE = 'M137 60 L95.1 21.7 A52 52 0 1 0 95.1 98.3 Z';
-
-function Ripples({ tag }: { tag: string }) {
-  return (
-    <div className="xf-ripples" key={tag} aria-hidden>
-      <span className="xf-glow" />
-      <span className="xf-ripple" style={{ animationDelay: '0ms' }} />
-      <span className="xf-ripple" style={{ animationDelay: '220ms' }} />
-      <span className="xf-ripple" style={{ animationDelay: '440ms' }} />
-    </div>
-  );
-}
 
 interface BubbleProps {
   side: Side;
@@ -44,18 +35,19 @@ interface BubbleProps {
   anim: string;
   /** Conteúdo no centro do anel (já girado de volta para ficar legível). */
   center: ReactNode;
-  ripples?: string;
 }
 
-function Bubble({ side, v, w, h, p, anim, center, ripples }: BubbleProps) {
+function Bubble({ side, v, w, h, p, anim, center }: BubbleProps) {
   const box = bubbleBox(side, v, w, h);
   return (
     <div
       className="xf-bubble"
       style={{ left: box.left, top: box.top, width: box.width, height: box.height }}
     >
-      <div className="xf-rot" style={{ transform: `rotate(${box.rotate}deg)` }}>
-        {ripples && <Ripples tag={ripples} />}
+      <div
+        className="xf-rot"
+        style={{ transform: `rotate(${box.rotate}deg) scale(${BUBBLE_SCALE})` }}
+      >
         <div className={`xf-inner ${anim}`}>
           <svg viewBox="0 0 140 120" width={140} height={120}>
             <path d={SHAPE} className="xf-shape" />
@@ -179,7 +171,6 @@ export function XferSend() {
         h={place.h}
         p={p}
         anim={anim}
-        ripples={mode === 'commit' ? 'send' : undefined}
         center={mode === 'commit' ? <Check /> : <Arrow />}
       />
     </div>
@@ -242,7 +233,7 @@ export function XferRecv() {
   const rows = st.items.length + (st.active ? 1 : 0);
   useEffect(() => {
     if (st.phase !== 'tray') return;
-    const h = 26 + Math.min(MAX_ROWS, Math.max(1, rows)) * ROW_H;
+    const h = 78 + Math.min(MAX_ROWS, Math.max(1, rows)) * ROW_H;
     void xfer.layout('xfer-recv', TRAY_W, h, true).then((pl) => pl && setPlace(pl));
   }, [st.phase, rows]);
 
@@ -270,7 +261,6 @@ export function XferRecv() {
           h={place.h}
           p={flash ? 1 : (st.active?.p ?? 1)}
           anim={flash ? 'xf-done' : 'xf-arrive'}
-          ripples={flash ? 'done' : 'arrive'}
           center={flash ? <Check /> : <span className="xf-pct">{pct}%</span>}
         />
       </div>
@@ -287,7 +277,11 @@ export function XferRecv() {
           >
             ✕
           </button>
-          <div className="xf-rows" style={{ maxHeight: MAX_ROWS * ROW_H }}>
+          <p className="xf-msg">
+            Chegou! Arraste para onde quiser, clique 2× para abrir ou use a pasta para ver onde
+            está.
+          </p>
+          <div className="xf-rows">
             {st.active && (
               <div className="xf-row xf-busy">
                 <FileGlyph />
@@ -299,7 +293,7 @@ export function XferRecv() {
                 </div>
               </div>
             )}
-            {st.items.map((f) => (
+            {st.items.slice(0, MAX_ROWS - (st.active ? 1 : 0)).map((f) => (
               <DragRow key={f.id} file={f} onDrag={() => void take(f)} />
             ))}
           </div>
@@ -310,12 +304,21 @@ export function XferRecv() {
   return <div className="xf-root" />;
 }
 
-const FileGlyph = () => (
-  <svg viewBox="0 0 24 24" width={30} height={30} className="xf-glyph">
-    <path d="M6 2.5h8l5 5V21a.5.5 0 0 1-.5.5h-12A.5.5 0 0 1 6 21z" fill="#e9eef5" />
-    <path d="M14 2.5v5h5" fill="#b7c3d3" />
-  </svg>
-);
+const FileGlyph = ({ folder = false }: { folder?: boolean }) =>
+  folder ? (
+    <svg viewBox="0 0 24 24" width={22} height={22} className="xf-glyph">
+      <path
+        d="M2.5 6.5a2 2 0 0 1 2-2h4.2l2 2.3h8.8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2h-15a2 2 0 0 1-2-2z"
+        fill="#f4c95d"
+      />
+      <path d="M2.5 10h19v8a2 2 0 0 1-2 2h-15a2 2 0 0 1-2-2z" fill="#f9dc8a" />
+    </svg>
+  ) : (
+    <svg viewBox="0 0 24 24" width={22} height={22} className="xf-glyph">
+      <path d="M6 2.5h8l5 5V21a.5.5 0 0 1-.5.5h-12A.5.5 0 0 1 6 21z" fill="#e9eef5" />
+      <path d="M14 2.5v5h5" fill="#b7c3d3" />
+    </svg>
+  );
 
 /** Linha arrastável: ao mover o mouse com o botão pressionado, inicia o arrastar nativo (OLE). */
 function DragRow({ file, onDrag }: { file: TrayFile; onDrag: () => void }) {
@@ -345,13 +348,29 @@ function DragRow({ file, onDrag }: { file: TrayFile; onDrag: () => void }) {
       onMouseDown={(e) => {
         if (e.button === 0) start.current = { x: e.clientX, y: e.clientY };
       }}
-      title={file.path}
+      onDoubleClick={() => {
+        start.current = null;
+        void xfer.open(file.id);
+      }}
+      title={`${file.path}\nClique duas vezes para abrir`}
     >
-      <FileGlyph />
+      <FileGlyph folder={file.folder} />
       <div className="xf-meta">
         <div className="xf-name">{file.name}</div>
-        <div className="xf-size">{formatBytes(file.size)}</div>
+        <div className="xf-size">
+          {file.folder ? 'Pasta · ' : ''}
+          {formatBytes(file.size)}
+        </div>
       </div>
+      <button
+        className="xf-loc"
+        title="Mostrar no Explorer"
+        onMouseDown={(e) => e.stopPropagation()}
+        onDoubleClick={(e) => e.stopPropagation()}
+        onClick={() => void xfer.reveal(file.id)}
+      >
+        <IconFolder size={15} />
+      </button>
     </div>
   );
 }

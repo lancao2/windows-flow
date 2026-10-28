@@ -47,6 +47,48 @@ impl Identity {
         })
     }
 
+    /// Serializa (certificado + chave) para guardar no perfil do usuário.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(8 + self.cert.len() + self.key.len());
+        out.extend_from_slice(&(self.cert.len() as u32).to_be_bytes());
+        out.extend_from_slice(self.cert.as_ref());
+        out.extend_from_slice(&self.key);
+        out
+    }
+
+    pub fn from_bytes(b: &[u8]) -> Option<Self> {
+        let len = u32::from_be_bytes(b.get(..4)?.try_into().ok()?) as usize;
+        let cert = b.get(4..4 + len)?;
+        let key = b.get(4 + len..)?;
+        if cert.is_empty() || key.is_empty() {
+            return None;
+        }
+        let id = Self {
+            cert: CertificateDer::from(cert.to_vec()),
+            key: key.to_vec(),
+        };
+        // Confere se a chave é utilizável antes de aceitar o arquivo.
+        ring_provider::default_provider()
+            .key_provider
+            .load_private_key(id.key_der())
+            .ok()?;
+        Some(id)
+    }
+
+    /// Identidade fixa deste PC: lê de `path` ou cria e grava. É ela que permite reconhecer um
+    /// computador já confiável sem pedir o código de novo.
+    pub fn load_or_create(path: &std::path::Path) -> Result<Self, TransportError> {
+        if let Some(id) = std::fs::read(path).ok().and_then(|b| Self::from_bytes(&b)) {
+            return Ok(id);
+        }
+        let id = Self::generate()?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(path, id.to_bytes())?;
+        Ok(id)
+    }
+
     pub fn fingerprint(&self) -> Fingerprint {
         Sha256::digest(self.cert.as_ref()).into()
     }
@@ -374,6 +416,20 @@ mod tests {
         ] {
             assert!(!is_lan(ip.parse().unwrap()), "{ip}");
         }
+    }
+
+    #[test]
+    fn identity_survives_a_restart_and_rejects_corrupt_files() {
+        let path = std::env::temp_dir().join(format!("wf-identity-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let first = Identity::load_or_create(&path).unwrap();
+        let again = Identity::load_or_create(&path).unwrap();
+        assert_eq!(first.fingerprint(), again.fingerprint());
+        assert!(Identity::from_bytes(b"lixo").is_none());
+        std::fs::write(&path, b"corrompido").unwrap();
+        let fresh = Identity::load_or_create(&path).unwrap();
+        assert_ne!(fresh.fingerprint(), first.fingerprint());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

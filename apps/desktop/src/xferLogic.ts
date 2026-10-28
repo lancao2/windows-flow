@@ -1,13 +1,14 @@
 import type { FileEvent, Side } from '@windows-flow/shared-types';
 
 /** Caixa da bolha (px CSS) com a ponta apontando para a borda: 140 ao longo do eixo da ponta. */
-export const BUBBLE_LONG = 140;
-export const BUBBLE_SHORT = 120;
+export const BUBBLE_SCALE = 0.63;
+export const BUBBLE_LONG = 88;
+export const BUBBLE_SHORT = 76;
 /** Raio do anel de progresso e seu perímetro (o centro da bolha é o círculo). */
 export const RING_R = 34;
 export const RING_C = 2 * Math.PI * RING_R;
 /** Atraso entre a animação de saída (um PC) e a de chegada (o outro). */
-export const ARRIVE_DELAY_MS = 900;
+export const ARRIVE_DELAY_MS = 1000;
 /** Tempo mínimo com o anel visível no receptor, mesmo para arquivos pequenos. */
 export const MIN_RING_MS = 1700;
 
@@ -56,6 +57,8 @@ export interface TrayFile {
   name: string;
   size: number;
   path: string;
+  /** O item é uma pasta inteira. */
+  folder: boolean;
 }
 
 export interface RecvState {
@@ -98,10 +101,19 @@ export function recvReducer(s: RecvState, a: RecvAction): RecvState {
       }
       if (f.state === 'done') {
         const last = f.index + 1 >= f.count;
-        const item: TrayFile = { id: f.id, name: f.name, size: f.size, path: f.path ?? '' };
+        // A bandeja tem um item por raiz (o arquivo avulso ou a pasta), no último arquivo dela.
+        const item: TrayFile | null = f.root_last
+          ? {
+              id: f.id,
+              name: f.root || f.name,
+              size: f.root_bytes || f.size,
+              path: f.root_path ?? f.path ?? '',
+              folder: f.is_dir,
+            }
+          : null;
         return {
           ...s,
-          items: [item, ...s.items.filter((i) => i.id !== f.id)].slice(0, 8),
+          items: item ? [item, ...s.items.filter((i) => i.id !== f.id)].slice(0, 8) : s.items,
           active: last ? null : s.active && { ...s.active, p: progress(f) },
           finished: last,
         };

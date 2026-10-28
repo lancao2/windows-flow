@@ -2,6 +2,6 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Permissões mínimas da janela principal",
-  "windows": ["main", "portal", "xfer-send", "xfer-recv"],
+  "windows": ["main", "portal", "xfer-send", "xfer-recv", "toast"],
   "permissions": ["core:default"]
 }

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Versão atual do protocolo. Incrementar em mudanças incompatíveis.
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 4;
 
 /// Tamanho máximo de um frame serializado (64 KiB). Os chunks de arquivo viajam
 /// em base64 dentro de um frame e por isso são menores ([`MAX_FILE_CHUNK`]).
@@ -16,8 +16,12 @@ pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const MAX_FILE_CHUNK: usize = 32 * 1024;
 /// Tamanho máximo de um arquivo transferido (16 GiB).
 pub const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
-/// Arquivos por lote.
-pub const MAX_FILES_PER_BATCH: u32 = 256;
+/// Arquivos por lote (uma pasta inteira conta arquivo a arquivo).
+pub const MAX_FILES_PER_BATCH: u32 = 10_000;
+/// Bytes por lote (64 GiB).
+pub const MAX_BATCH_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+/// Profundidade máxima de pastas num caminho relativo.
+pub const MAX_REL_DEPTH: usize = 32;
 /// Tamanho máximo de texto de clipboard (1 MiB seria excessivo para o frame; o
 /// clipboard usará canal próprio na fase 4).
 pub const MAX_CLIPBOARD_BYTES: usize = 32 * 1024;
@@ -99,11 +103,19 @@ pub enum Message {
     /// e `ratio` a posição, na borda de quem envia, por onde o arquivo "atravessa".
     FileOffer {
         id: u64,
+        /// Nome do arquivo (último componente de `rel`).
         name: String,
+        /// Caminho relativo com `/`, a partir do item solto na borda: `a.txt` para um arquivo
+        /// avulso ou `Pasta/sub/a.txt` dentro de uma pasta. O 1º componente é o item raiz.
+        rel: String,
         size: u64,
         index: u32,
         count: u32,
         batch_bytes: u64,
+        /// Total de bytes do item raiz (o arquivo avulso ou a pasta inteira).
+        root_bytes: u64,
+        /// Este é o último arquivo do item raiz.
+        root_last: bool,
         ratio: u16,
     },
     /// Pedaço do arquivo `id` a partir de `offset` (dados em base64).
@@ -173,17 +185,27 @@ impl Message {
             }
             Message::FileOffer {
                 name,
+                rel,
                 size,
                 index,
                 count,
                 batch_bytes,
+                root_bytes,
                 ratio,
                 ..
             } => {
                 if !is_valid_file_name(name) {
                     return Err(ProtocolError::InvalidField("name"));
                 }
-                if *size > MAX_FILE_BYTES || *batch_bytes < *size || *batch_bytes > MAX_FILE_BYTES {
+                if !is_valid_rel(rel) || rel.rsplit('/').next() != Some(name.as_str()) {
+                    return Err(ProtocolError::InvalidField("rel"));
+                }
+                if *size > MAX_FILE_BYTES
+                    || *batch_bytes < *size
+                    || *batch_bytes > MAX_BATCH_BYTES
+                    || *root_bytes < *size
+                    || *root_bytes > *batch_bytes
+                {
                     return Err(ProtocolError::InvalidField("size"));
                 }
                 if *count == 0 || *count > MAX_FILES_PER_BATCH || index >= count {
@@ -202,6 +224,15 @@ impl Message {
         }
         Ok(())
     }
+}
+
+/// Caminho relativo seguro com `/`: cada componente é um nome válido, sem `..`, sem raiz e com
+/// profundidade limitada.
+pub fn is_valid_rel(rel: &str) -> bool {
+    !rel.is_empty()
+        && rel.len() <= 1_024
+        && rel.split('/').count() <= MAX_REL_DEPTH
+        && rel.split('/').all(is_valid_file_name)
 }
 
 /// Nome de arquivo simples: sem separadores, sem `:`, sem caracteres de controle e sem
@@ -390,12 +421,40 @@ mod tests {
         Message::FileOffer {
             id: 1,
             name: name.into(),
+            rel: name.into(),
             size,
             index: 0,
             count: 1,
             batch_bytes: size,
+            root_bytes: size,
+            root_last: true,
             ratio: 5_000,
         }
+    }
+
+    #[test]
+    fn relative_paths_stay_inside_the_root() {
+        for bad in [
+            "", "/a", "a//b", "../a", "a/../b", "a\\b", "C:/a", "a/", "a/b.",
+        ] {
+            assert!(!is_valid_rel(bad), "{bad:?}");
+        }
+        assert!(is_valid_rel("Pasta/sub/relatório.txt"));
+        assert!(!is_valid_rel(&vec!["d"; MAX_REL_DEPTH + 1].join("/")));
+        // `rel` precisa terminar no nome do arquivo anunciado.
+        let m = Message::FileOffer {
+            id: 1,
+            name: "a.txt".into(),
+            rel: "Pasta/b.txt".into(),
+            size: 1,
+            index: 0,
+            count: 1,
+            batch_bytes: 1,
+            root_bytes: 1,
+            root_last: true,
+            ratio: 0,
+        };
+        assert_eq!(m.validate(), Err(ProtocolError::InvalidField("rel")));
     }
 
     #[test]

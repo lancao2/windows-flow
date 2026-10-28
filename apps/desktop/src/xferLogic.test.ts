@@ -24,6 +24,11 @@ const ev = (over: Partial<FileEvent>): FileEvent => ({
   side: 'left',
   screen: [0, 0, 1920, 1080],
   path: null,
+  root: 'a.txt',
+  root_path: null,
+  root_bytes: 100,
+  root_last: false,
+  is_dir: false,
   ...over,
 });
 
@@ -32,15 +37,15 @@ const run = (events: FileEvent[], from: RecvState = initialRecv) =>
 
 describe('bubbleBox', () => {
   it('encosta a ponta na borda de cada lado, girando a bolha', () => {
-    expect(bubbleBox('right', 200, 400, 400)).toMatchObject({ left: 260, top: 140, rotate: 0 });
-    expect(bubbleBox('left', 200, 400, 400)).toMatchObject({ left: 0, top: 140, rotate: 180 });
-    expect(bubbleBox('top', 200, 400, 400)).toMatchObject({ left: 140, top: 0, rotate: 270 });
-    expect(bubbleBox('bottom', 200, 400, 400)).toMatchObject({ left: 140, top: 260, rotate: 90 });
+    expect(bubbleBox('right', 200, 400, 400)).toMatchObject({ left: 312, top: 162, rotate: 0 });
+    expect(bubbleBox('left', 200, 400, 400)).toMatchObject({ left: 0, top: 162, rotate: 180 });
+    expect(bubbleBox('top', 200, 400, 400)).toMatchObject({ left: 162, top: 0, rotate: 270 });
+    expect(bubbleBox('bottom', 200, 400, 400)).toMatchObject({ left: 162, top: 312, rotate: 90 });
   });
 
   it('mantém a bolha dentro da janela quando o contato está perto do canto', () => {
     expect(bubbleBox('right', -50, 400, 400).top).toBe(0);
-    expect(bubbleBox('right', 999, 400, 400).top).toBe(280);
+    expect(bubbleBox('right', 999, 400, 400).top).toBe(324);
   });
 });
 
@@ -73,10 +78,47 @@ describe('recvReducer', () => {
   });
 
   it('último arquivo concluído marca o lote como terminado e entra na bandeja', () => {
-    let s = run([ev({}), ev({ state: 'done', batch_done: 100, path: 'C:\\x\\a.txt' })]);
+    let s = run([
+      ev({}),
+      ev({
+        state: 'done',
+        batch_done: 100,
+        path: 'C:\\x\\a.txt',
+        root_last: true,
+        root_path: 'C:\\x\\a.txt',
+      }),
+    ]);
     s = recvReducer(recvReducer(s, { t: 'show' }), { t: 'tray' });
     expect(s).toMatchObject({ phase: 'tray', finished: true, active: null });
     expect(s.items.map((i) => i.name)).toEqual(['a.txt']);
+  });
+
+  it('pasta com vários arquivos vira um único item na bandeja', () => {
+    const f = (i: number, over: Partial<FileEvent> = {}) =>
+      ev({
+        id: i,
+        index: i,
+        count: 3,
+        batch_bytes: 90,
+        root: 'Projeto',
+        root_bytes: 90,
+        is_dir: true,
+        ...over,
+      });
+    let s = run([f(0), f(0, { state: 'done', batch_done: 30 })]);
+    s = run([f(1), f(1, { state: 'done', batch_done: 60 })], s);
+    expect(s.items).toHaveLength(0);
+    const last = f(2, {
+      state: 'done',
+      batch_done: 90,
+      root_last: true,
+      root_path: 'C:\\d\\Projeto',
+    });
+    s = run([f(2), last], s);
+    expect(s.items).toEqual([
+      { id: 2, name: 'Projeto', size: 90, path: 'C:\\d\\Projeto', folder: true },
+    ]);
+    expect(s.finished).toBe(true);
   });
 
   it('lote com vários arquivos só termina no último', () => {
@@ -90,13 +132,13 @@ describe('recvReducer', () => {
 
   it('falha sem arquivos esconde tudo; com arquivos mantém a bandeja', () => {
     expect(run([ev({}), ev({ state: 'failed' })]).phase).toBe('hidden');
-    const withItem = run([ev({}), ev({ state: 'done', batch_done: 100 })]);
+    const withItem = run([ev({}), ev({ state: 'done', batch_done: 100, root_last: true })]);
     const s = recvReducer(withItem, { t: 'tray' });
     expect(run([ev({ id: 2 }), ev({ id: 2, state: 'failed' })], s).phase).toBe('tray');
   });
 
   it('pegar o último arquivo da bandeja a esconde', () => {
-    let s = run([ev({}), ev({ state: 'done', batch_done: 100 })]);
+    let s = run([ev({}), ev({ state: 'done', batch_done: 100, root_last: true })]);
     s = recvReducer(s, { t: 'tray' });
     expect(recvReducer(s, { t: 'remove', id: 1 }).phase).toBe('hidden');
   });

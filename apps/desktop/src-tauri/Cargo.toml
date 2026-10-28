@@ -16,8 +16,11 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon"] }
 continuity-core = { path = "../../../crates/continuity-core" }
 protocol = { path = "../../../crates/protocol" }
-windows-input = { version = "0.3.0", path = "../../../crates/windows-input" }
-tokio = { version = "1.54.1", default-features = false, features = ["sync", "time"] }
+discovery = { path = "../../../crates/discovery" }
+transport = { path = "../../../crates/transport" }
+serde_json.workspace = true
+windows-input = { version = "0.5.0", path = "../../../crates/windows-input" }
+tokio = { version = "1.54.1", default-features = false, features = ["sync", "time", "macros", "net"] }
 serde = { workspace = true, features = ["derive"] }
 
 [lints]

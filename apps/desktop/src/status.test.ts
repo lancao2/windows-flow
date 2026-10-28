@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { linkLabel, looksLikePeerAddress, sideLabel, stateLabel } from './status';
+import { linkLabel, looksLikePeerAddress, nearestSide, sideLabel, stateLabel } from './status';
 
 describe('labels', () => {
   it('traduz estados', () => {
@@ -19,5 +19,15 @@ describe('looksLikePeerAddress', () => {
     for (const s of ['', 'abc', '300.1.1.1', '1.1.1.1:0', '1.1.1.1:70000', '1.1.1']) {
       expect(looksLikePeerAddress(s)).toBe(false);
     }
+  });
+});
+
+describe('nearestSide', () => {
+  it('escolhe o lado pelo eixo dominante', () => {
+    expect(nearestSide(120, 10)).toBe('right');
+    expect(nearestSide(-120, -10)).toBe('left');
+    expect(nearestSide(5, -90)).toBe('top');
+    expect(nearestSide(-5, 90)).toBe('bottom');
+    expect(nearestSide(0, 0)).toBe('right');
   });
 });
