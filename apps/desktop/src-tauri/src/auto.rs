@@ -53,6 +53,10 @@ pub struct Settings {
     pub auto_connect: bool,
     /// Computadores confiáveis: conectam sem pedir o código de novo.
     pub known: Vec<KnownPc>,
+    /// Iniciar com o Windows (minimizado na bandeja).
+    pub autostart: bool,
+    /// O pedido de liberação do firewall já foi feito (não insiste a cada abertura).
+    pub firewall_prompted: bool,
 }
 
 impl Default for Settings {
@@ -62,6 +66,8 @@ impl Default for Settings {
             visible: true,
             auto_connect: true,
             known: Vec::new(),
+            autostart: true,
+            firewall_prompted: false,
         }
     }
 }
@@ -87,6 +93,8 @@ pub struct Auto {
     /// O usuário marcou "não perguntar de novo" no aviso: o diálogo do código já vem marcado.
     remember_next: AtomicBool,
     disc_status: Mutex<Option<DiscStatus>>,
+    /// Último resultado (e quando) da checagem das regras de firewall.
+    firewall: Mutex<Option<(Instant, bool)>>,
     discovery: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
 }
 
@@ -106,6 +114,7 @@ impl Auto {
             current_fp: Mutex::new(None),
             remember_next: AtomicBool::new(false),
             disc_status: Mutex::new(None),
+            firewall: Mutex::new(None),
             discovery: Mutex::new(None),
         }
     }
@@ -133,6 +142,33 @@ impl Auto {
 
     pub fn pause(&self) {
         self.paused.store(true, Ordering::Relaxed);
+    }
+
+    pub fn peers_snapshot(&self) -> Vec<Peer> {
+        self.peers.lock().map(|p| p.clone()).unwrap_or_default()
+    }
+
+    /// Não há mais conexão: esquece qual computador era (a posição só vale para o conectado).
+    pub fn clear_peer(&self) {
+        if let Ok(mut c) = self.current_fp.lock() {
+            *c = None;
+        }
+    }
+
+    /// As regras de firewall existem? (guarda o resultado por 10 s: o `netsh` é lento.)
+    pub fn firewall_ok(&self, force: bool) -> bool {
+        if !force {
+            if let Some((t, v)) = self.firewall.lock().ok().and_then(|f| *f) {
+                if t.elapsed() < Duration::from_secs(10) {
+                    return v;
+                }
+            }
+        }
+        let v = windows_input::windows_impl::firewall_rules_present();
+        if let Ok(mut f) = self.firewall.lock() {
+            *f = Some((Instant::now(), v));
+        }
+        v
     }
 
     /// Impressões digitais confiáveis para o motor.
@@ -636,26 +672,141 @@ pub fn forget_known(app: AppHandle, state: State<'_, App>, fingerprint: String) 
     let _ = app.emit("settings-changed", s);
 }
 
+/// Conecta a um IP (descoberto, conhecido ou escolhido no menu da bandeja).
+pub fn connect_ip(app: &AppHandle, ip: Ipv4Addr, port: u16, remember: bool) {
+    let Some(st) = app.try_state::<App>() else {
+        return;
+    };
+    st.auto.resume();
+    st.auto.remember_next.store(remember, Ordering::Relaxed);
+    st.engine
+        .send(Command::Connect(SocketAddr::new(IpAddr::V4(ip), port)));
+    hide_toast(app);
+}
+
+/// Desconexão pedida pelo usuário: não reconecta sozinho até ele conectar de novo.
+pub fn disconnect(app: &AppHandle) {
+    if let Some(st) = app.try_state::<App>() {
+        st.auto.pause();
+        st.engine.send(Command::Disconnect);
+    }
+}
+
+/// Abre o seletor de arquivos (ou de pasta) do Windows e envia o que for escolhido.
+pub fn pick_and_send(app: AppHandle, folder: bool) {
+    std::thread::spawn(move || {
+        let dialog = rfd::FileDialog::new().set_title(if folder {
+            "Escolha a pasta para enviar"
+        } else {
+            "Escolha os arquivos para enviar"
+        });
+        let paths = if folder {
+            dialog.pick_folder().map(|p| vec![p])
+        } else {
+            dialog.pick_files()
+        };
+        if let (Some(paths), Some(st)) = (paths, app.try_state::<App>()) {
+            // Sem arrastar até a borda: a animação de chegada sai do meio da borda.
+            st.engine.send(Command::SendFiles {
+                paths,
+                ratio: 5_000,
+            });
+        }
+    });
+}
+
+/// Aplica o início com o Windows e, uma vez, pede a liberação do firewall (UAC).
+/// Execuções de teste (`--preview*`, `--xfer-qa*`) não mexem no sistema.
+pub fn system_setup(app: &AppHandle) {
+    let qa = std::env::args().any(|a| a.starts_with("--preview") || a.starts_with("--xfer-qa"));
+    let Some(st) = app.try_state::<App>() else {
+        return;
+    };
+    if qa {
+        return;
+    }
+    apply_autostart(st.auto.settings().autostart);
+    if std::env::var_os("WF_SKIP_FIREWALL").is_some() {
+        return;
+    }
+    let h = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let Some(st) = h.try_state::<App>() else {
+            return;
+        };
+        if st.auto.firewall_ok(true) || st.auto.settings().firewall_prompted {
+            return;
+        }
+        st.auto.update(|s| s.firewall_prompted = true);
+        windows_input::windows_impl::request_firewall_rules();
+    });
+}
+
+fn apply_autostart(enabled: bool) {
+    use windows_input::windows_impl::{autostart_command, set_autostart};
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let cmd = format!("\"{}\" --minimized", exe.display());
+    let current = autostart_command();
+    if enabled && current.as_deref() != Some(cmd.as_str()) {
+        set_autostart(true, &cmd);
+    } else if !enabled && current.is_some() {
+        set_autostart(false, "");
+    }
+}
+
+#[tauri::command]
+pub fn set_autostart_pref(app: AppHandle, state: State<'_, App>, enabled: bool) {
+    let s = state.auto.update(|s| s.autostart = enabled);
+    apply_autostart(enabled);
+    let _ = app.emit("settings-changed", s);
+}
+
+/// Pede ao Windows para liberar as portas do app no firewall (abre o aviso do UAC).
+#[tauri::command]
+pub fn fix_firewall(app: AppHandle, state: State<'_, App>) {
+    state.auto.update(|s| s.firewall_prompted = true);
+    windows_input::windows_impl::request_firewall_rules();
+    // Confere de novo depois que o usuário responder ao aviso.
+    tauri::async_runtime::spawn(async move {
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            if let Some(st) = app.try_state::<App>() {
+                if st.auto.firewall_ok(true) {
+                    let _ = app.emit("firewall-changed", true);
+                    return;
+                }
+            }
+        }
+    });
+}
+
+#[tauri::command]
+pub fn cancel_transfers(state: State<'_, App>) {
+    state.engine.send(Command::CancelTransfers);
+}
+
+#[tauri::command(async)]
+pub fn pick_and_send_cmd(app: AppHandle, folder: bool) {
+    pick_and_send(app, folder);
+}
+
 /// Conecta a um PC descoberto. `remember`: o aviso foi aceito com "não perguntar de novo".
 #[tauri::command]
 pub fn connect_peer(
     app: AppHandle,
-    state: State<'_, App>,
     ip: String,
     port: Option<u16>,
     remember: Option<bool>,
 ) -> Result<(), String> {
     let ip: Ipv4Addr = ip.parse().map_err(|_| "endereço inválido".to_string())?;
-    state.auto.resume();
-    state
-        .auto
-        .remember_next
-        .store(remember.unwrap_or(false), Ordering::Relaxed);
-    state.engine.send(Command::Connect(SocketAddr::new(
-        IpAddr::V4(ip),
+    connect_ip(
+        &app,
+        ip,
         port.unwrap_or(DEFAULT_PORT),
-    )));
-    hide_toast(&app);
+        remember.unwrap_or(false),
+    );
     Ok(())
 }
 

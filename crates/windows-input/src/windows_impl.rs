@@ -777,5 +777,7 @@ pub fn virtual_screen() -> Rect {
 }
 
 pub use crate::shell::{
-    downloads_dir, open_path, reveal_path, start_file_drag, DropCatcher, DropEvent,
+    autostart_command, confirm_box, downloads_dir, firewall_command, firewall_rules_present,
+    open_path, request_firewall_rules, reveal_path, set_autostart, start_file_drag, DropCatcher,
+    DropEvent, FIREWALL_RULES,
 };

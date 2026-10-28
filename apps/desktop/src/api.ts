@@ -6,6 +6,7 @@ import type {
   DeviceInfo,
   DiscStatus,
   EngineStatus,
+  FileEvent,
   PeerInfo,
   Side,
   XferPlacement,
@@ -28,6 +29,10 @@ export const api = {
   forgetLastPeer: () => invoke<void>('forget_last_peer'),
   connectPeer: (ip: string, port?: number, remember = false) =>
     invoke<void>('connect_peer', { ip, port, remember }),
+  setAutostart: (enabled: boolean) => invoke<void>('set_autostart_pref', { enabled }),
+  fixFirewall: () => invoke<void>('fix_firewall'),
+  cancelTransfers: () => invoke<void>('cancel_transfers'),
+  pickAndSend: (folder: boolean) => invoke<void>('pick_and_send_cmd', { folder }),
   forgetKnown: (fingerprint: string) => invoke<void>('forget_known', { fingerprint }),
   discovery: () => invoke<DiscStatus | null>('get_discovery'),
   toastDismiss: (id: string) => invoke<void>('toast_dismiss', { id }),
@@ -54,6 +59,8 @@ export function subscribe(handlers: {
   onSettings: (s: AppSettings) => void;
   onPeers: (p: PeerInfo[]) => void;
   onDiscovery: (d: DiscStatus) => void;
+  onTransfer: (f: FileEvent) => void;
+  onFirewall: () => void;
 }): Promise<UnlistenFn[]> {
   return Promise.all([
     listen<EngineStatus>('engine-status', (e) => handlers.onStatus(e.payload)),
@@ -62,5 +69,7 @@ export function subscribe(handlers: {
     listen<AppSettings>('settings-changed', (e) => handlers.onSettings(e.payload)),
     listen<PeerInfo[]>('peers-changed', (e) => handlers.onPeers(e.payload)),
     listen<DiscStatus>('discovery-status', (e) => handlers.onDiscovery(e.payload)),
+    listen<FileEvent>('transfer-event', (e) => handlers.onTransfer(e.payload)),
+    listen<boolean>('firewall-changed', () => handlers.onFirewall()),
   ]);
 }

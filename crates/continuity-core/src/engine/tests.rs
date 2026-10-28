@@ -179,8 +179,12 @@ fn confirm(accept: bool) -> Command {
 }
 
 async fn connected_pair() -> (Node, Node) {
-    let mut a = Node::new("pc-a", Side::Right);
-    let mut b = Node::new("pc-b", Side::Left);
+    connected_pair_with(Side::Right, Side::Left).await
+}
+
+async fn connected_pair_with(side_a: Side, side_b: Side) -> (Node, Node) {
+    let mut a = Node::new("pc-a", side_a);
+    let mut b = Node::new("pc-b", side_b);
     a.handle.send(Command::Host("127.0.0.1:0".parse().unwrap()));
     let listening = a.wait_status("escutando", |s| s.listening.is_some()).await;
     b.handle.send(Command::Connect(
@@ -717,4 +721,88 @@ async fn remembered_computer_reconnects_without_asking_for_the_code_again() {
         a.sas.is_none() && b.sas.is_none(),
         "não deve pedir o código"
     );
+}
+
+#[tokio::test]
+async fn the_connecting_pc_sets_the_position_on_both_sides() {
+    // Os dois acham que o outro está à direita (impossível): quem conectou (B) decide e A
+    // adota o lado oposto.
+    let (a, b) = connected_pair_with(Side::Right, Side::Right).await;
+    let mut a = a;
+    a.wait_status("A adota o oposto", |s| s.peer_side == "left")
+        .await;
+    assert_eq!(b.last.as_ref().unwrap().peer_side, "right");
+}
+
+#[tokio::test]
+async fn changing_the_position_on_one_pc_updates_the_other() {
+    let (mut a, mut b) = connected_pair().await;
+    a.handle.send(Command::SetPeerSide(Side::Top));
+    a.wait_status("A em cima", |s| s.peer_side == "top").await;
+    b.wait_status("B recebe o oposto", |s| s.peer_side == "bottom")
+        .await;
+}
+
+#[tokio::test]
+async fn the_other_pc_version_is_known_after_connecting() {
+    let (mut a, mut b) = connected_pair().await;
+    let v = Some(env!("CARGO_PKG_VERSION").to_string());
+    let sa = a
+        .wait_status("A vê a versão", |s| s.peer_version.is_some())
+        .await;
+    let sb = b
+        .wait_status("B vê a versão", |s| s.peer_version.is_some())
+        .await;
+    assert_eq!((sa.peer_version, sb.peer_version), (v.clone(), v));
+}
+
+#[tokio::test]
+async fn cancelling_stops_both_sides_and_leaves_no_partial_file() {
+    let (mut a, mut b) = connected_pair().await;
+    let dir = std::env::temp_dir().join(format!("wf-engine-cancel-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("enorme.bin");
+    std::fs::write(&f, vec![9u8; 40_000_000]).unwrap();
+    a.handle.send(Command::SendFiles {
+        paths: vec![f],
+        ratio: 5_000,
+    });
+    // O envio aparece (oferta) em A e o recebimento começa em B.
+    while !a.files.iter().any(|f| f.dir == "out" && f.state == "offer") {
+        a.pump("oferta em A").await;
+    }
+    while !b.files.iter().any(|f| f.state == "offer") {
+        b.pump("oferta em B").await;
+    }
+    b.handle.send(Command::CancelTransfers);
+    while !b.files.iter().any(|f| f.state == "cancelled") {
+        b.pump("cancelado em B").await;
+    }
+    while !a
+        .files
+        .iter()
+        .any(|f| f.dir == "out" && f.state == "cancelled")
+    {
+        a.pump("cancelado em A").await;
+    }
+    assert!(!b.files.iter().any(|f| f.state == "done"));
+    assert!(std::fs::read_dir(&b.downloads).unwrap().next().is_none());
+    // A pode enviar de novo depois de cancelar.
+    let g = dir.join("pequeno.txt");
+    std::fs::write(&g, "ok").unwrap();
+    a.handle.send(Command::SendFiles {
+        paths: vec![g],
+        ratio: 5_000,
+    });
+    while !b.files.iter().any(|f| f.state == "done") {
+        b.pump("novo envio concluído").await;
+    }
+    assert!(
+        a.files
+            .iter()
+            .any(|f| f.dir == "out" && f.state == "progress")
+            || a.files.iter().any(|f| f.dir == "out" && f.state == "done")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&b.downloads);
 }

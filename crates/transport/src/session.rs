@@ -20,6 +20,8 @@ pub enum CloseReason {
     Io,
     /// Mensagem malformada, fora de ordem ou repetida.
     Protocol,
+    /// O par fala outra versão do protocolo (a dele está no valor).
+    PeerVersion(u16),
 }
 
 #[derive(Debug)]
@@ -52,6 +54,9 @@ impl Drop for SessionHandle {
 fn reason_for(e: &TransportError) -> CloseReason {
     match e {
         TransportError::Closed => CloseReason::PeerClosed,
+        TransportError::Protocol(protocol::ProtocolError::UnsupportedVersion(v)) => {
+            CloseReason::PeerVersion(*v)
+        }
         TransportError::Protocol(_) => CloseReason::Protocol,
         TransportError::Timeout => CloseReason::Timeout,
         _ => CloseReason::Io,
@@ -158,6 +163,7 @@ mod tests {
             protocol_version: protocol::PROTOCOL_VERSION,
             device_id: id.into(),
             nonce: [0; NONCE_LEN],
+            app_version: String::new(),
         }
     }
 

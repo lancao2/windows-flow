@@ -14,6 +14,8 @@ export interface EngineStatus {
   controlled: boolean;
   peer_side: Side;
   peer: string | null;
+  /** Versão do app no outro PC (depois de conectar). */
+  peer_version: string | null;
   listening: string | null;
 }
 
@@ -48,9 +50,13 @@ export interface DeviceInfo {
   hotkey_registered: boolean;
   /** Estado da animação de transição informado pelo overlay (WebGL ok, plano B, erro...). */
   portal_health: string;
+  /** Iniciar com o Windows está ligado. */
+  autostart: boolean;
+  /** As regras de firewall do app existem. */
+  firewall_ok: boolean;
 }
 
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
 
 /** Posição da janela de transferência rente à borda (espelha xfer::Placement). */
 export interface XferPlacement {
@@ -74,7 +80,7 @@ export interface XferSendEvent {
 /** Espelha continuity_core::engine::FileEvent. */
 export interface FileEvent {
   dir: 'in' | 'out';
-  state: 'offer' | 'progress' | 'done' | 'failed';
+  state: 'offer' | 'progress' | 'done' | 'failed' | 'cancelled';
   id: number;
   name: string;
   size: number;
@@ -133,6 +139,9 @@ export interface AppSettings {
   /** Reconectar sozinho aos computadores conhecidos. */
   auto_connect: boolean;
   known: KnownPc[];
+  /** Iniciar com o Windows (minimizado na bandeja). */
+  autostart: boolean;
+  firewall_prompted: boolean;
 }
 
 /** Notificação "PC encontrado na rede". */

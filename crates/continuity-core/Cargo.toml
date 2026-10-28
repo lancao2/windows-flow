@@ -6,10 +6,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-protocol = { version = "0.5.0", path = "../protocol" }
-transport = { version = "0.5.0", path = "../transport" }
-windows-input = { version = "0.5.0", path = "../windows-input" }
-file-transfer = { version = "0.5.0", path = "../file-transfer" }
+protocol = { version = "0.6.0", path = "../protocol" }
+transport = { version = "0.6.0", path = "../transport" }
+windows-input = { version = "0.6.0", path = "../windows-input" }
+file-transfer = { version = "0.6.0", path = "../file-transfer" }
 tokio = { version = "1.54.1", features = ["rt", "time", "sync", "macros"] }
 serde = { workspace = true, features = ["derive"] }
 

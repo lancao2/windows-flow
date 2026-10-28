@@ -6,8 +6,6 @@ use std::time::Duration;
 use continuity_core::engine::{Command, Engine, EngineConfig, EngineHandle, Status, UiEvent};
 use serde::Serialize;
 use tauri::{
-    menu::{Menu, MenuItem},
-    tray::TrayIconBuilder,
     AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, RunEvent, State, WebviewUrl,
     WebviewWindowBuilder, WindowEvent,
 };
@@ -16,6 +14,7 @@ use windows_input::windows_impl::WinPlatform;
 use windows_input::Side;
 
 mod auto;
+mod tray;
 mod xfer;
 
 const DEFAULT_PORT: u16 = 47_800;
@@ -36,6 +35,7 @@ struct App {
     portal_health: Mutex<String>,
     xfer: Mutex<xfer::Xfer>,
     auto: auto::Auto,
+    tray_key: Mutex<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -58,6 +58,10 @@ struct Info {
     default_port: u16,
     hotkey_registered: bool,
     portal_health: String,
+    /// Iniciar com o Windows está ligado.
+    autostart: bool,
+    /// As regras de firewall do app existem.
+    firewall_ok: bool,
 }
 
 #[tauri::command]
@@ -82,6 +86,8 @@ fn get_info(app: State<'_, App>) -> Info {
             .lock()
             .map(|h| h.clone())
             .unwrap_or_default(),
+        autostart: app.auto.settings().autostart,
+        firewall_ok: app.auto.firewall_ok(false),
     }
 }
 
@@ -167,6 +173,11 @@ fn forward_events(app: AppHandle, mut rx: mpsc::UnboundedReceiver<UiEvent>) {
                         }
                         if s.link == "connected" {
                             state.auto.on_connected(&app, s.peer.as_deref());
+                            // Mudanças de posição (inclusive as vindas do outro PC) ficam salvas
+                            // para o computador conhecido.
+                            state.auto.save_side(&app, s.peer_side);
+                        } else {
+                            state.auto.clear_peer();
                         }
                     }
                     let _ = app.emit("engine-status", s);
@@ -184,7 +195,10 @@ fn forward_events(app: AppHandle, mut rx: mpsc::UnboundedReceiver<UiEvent>) {
                     enter,
                     screen,
                 } => show_portal(&app, side, ratio, enter, screen),
-                UiEvent::File(f) => xfer::on_file_event(&app, f),
+                UiEvent::File(f) => {
+                    let _ = app.emit("transfer-event", &f);
+                    xfer::on_file_event(&app, f);
+                }
                 UiEvent::PeerHello {
                     name,
                     fingerprint,
@@ -409,6 +423,11 @@ fn create_portal_window(app: &tauri::App) -> tauri::Result<()> {
 
 pub fn run() {
     let app = tauri::Builder::default()
+        // Uma única instância: abrir de novo só traz a janela existente para a frente (duas
+        // instâncias disputariam as portas 47800/47801 e os hooks do mouse).
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main_window(app);
+        }))
         .invoke_handler(tauri::generate_handler![
             get_info,
             get_status,
@@ -435,7 +454,11 @@ pub fn run() {
             auto::set_auto_connect,
             auto::forget_last_peer,
             auto::connect_peer,
-            auto::toast_dismiss
+            auto::toast_dismiss,
+            auto::set_autostart_pref,
+            auto::fix_firewall,
+            auto::cancel_transfers,
+            auto::pick_and_send_cmd
         ])
         .on_window_event(|window, event| {
             // Fechar a janela mantém o app na bandeja; "Sair" encerra de verdade.
@@ -474,6 +497,7 @@ pub fn run() {
                 snapshot: Mutex::new(Vec::new()),
                 portal_health: Mutex::new("aguardando o overlay iniciar".into()),
                 xfer: Mutex::new(xfer::Xfer::default()),
+                tray_key: Mutex::new(String::new()),
                 auto: auto_state,
             });
             auto::create_toast_window(app)?;
@@ -515,29 +539,12 @@ pub fn run() {
             forward_events(app.handle().clone(), ui_rx);
             tauri::async_runtime::spawn(engine.run());
 
-            let show = MenuItem::with_id(app, "show", "Abrir Windows Flow", true, None::<&str>)?;
-            let disc = MenuItem::with_id(app, "disconnect", "Desconectar", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Sair", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &disc, &quit])?;
-            TrayIconBuilder::new()
-                .icon(
-                    app.default_window_icon()
-                        .cloned()
-                        .expect("ícone padrão ausente"),
-                )
-                .tooltip("Windows Flow")
-                .menu(&menu)
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "show" => show_main_window(app),
-                    "disconnect" => {
-                        if let Some(s) = app.try_state::<App>() {
-                            s.engine.send(Command::Disconnect);
-                        }
-                    }
-                    "quit" => app.exit(0),
-                    _ => {}
-                })
-                .build(app)?;
+            tray::create(app)?;
+            // Inicia minimizado na bandeja quando aberto pelo Windows (--minimized).
+            if !std::env::args().any(|a| a == "--minimized") {
+                show_main_window(app.handle());
+            }
+            auto::system_setup(app.handle());
             Ok(())
         })
         .build(tauri::generate_context!())

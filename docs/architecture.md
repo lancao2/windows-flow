@@ -109,3 +109,14 @@ Monorepo: `apps/desktop` (Tauri 2 + React), `crates/*` (Rust), `packages/shared-
 - **Pastas:** arrastar uma pasta até a borda envia todos os arquivos dentro dela, recursivamente (`file_transfer::plan`). Protocolo v4: `FileOffer` ganhou `rel` (caminho relativo com `/`, validado componente a componente), `root_bytes` e `root_last`. No destino, a pasta é recriada em Downloads (`Pasta (1)` se já existe; nada é sobrescrito) e a bandeja mostra **um item por pasta**. Atalhos, links e junções não são seguidos; pastas vazias não são recriadas; limites: 10 000 arquivos e 64 GiB por lote, 32 níveis.
 - **Bandeja:** clique duplo no item abre o arquivo/pasta com o programa padrão (`ShellExecute`); o botão de pasta abre o Explorer com o item selecionado.
 - **Troca de tela:** só fica travada enquanto o botão do mouse está pressionado (segurando o arquivo na borda). Durante o envio/recebimento (já com o botão solto) o cursor cruza normalmente.
+
+### 0.6.0 — rotina diária e transferências
+
+- **Instância única** (`tauri-plugin-single-instance`): abrir de novo só traz a janela existente.
+- **Iniciar com o Windows:** chave `HKCU\...\Run` com `--minimized` (abre só na bandeja). Ligado por padrão; desligável em Ajustes. Execuções de QA (`--preview*`, `--xfer-qa*`) não alteram o sistema.
+- **Firewall:** no primeiro uso, se as regras não existem, o app pede (UAC, uma vez) para criar `Windows Flow TCP 47800` e `Windows Flow UDP 47801` só nas redes privada e de domínio (`netsh advfirewall`). Em Ajustes há o estado e o botão "Liberar". `WF_SKIP_FIREWALL=1` pula o pedido. (Foi feito no app, e não no instalador, para valer também para o MSI e depois de atualizações, sem exigir instalação para todos os usuários.)
+- **Posição sincronizada** (`Message::PeerSide`, protocolo v5): mudar a posição num PC faz o outro adotar o lado oposto; ao conectar, quem iniciou a conexão informa a posição e o outro a adota. Mudanças ficam salvas para o computador conhecido.
+- **Transferências:** o PC que envia agora também emite progresso; nova aba **Arquivos** com envio por seletor ("Enviar arquivos…/pasta…"), progresso, **cancelar** (para nos dois PCs, sem deixar arquivo parcial) e histórico da sessão.
+- **Executáveis recebidos:** duplo clique em `.exe/.bat/.ps1/.msi/.lnk/...` na bandeja pede confirmação (padrão "Não").
+- **Versão do par:** o `Hello` leva a versão do app (campo opcional); a interface mostra "v0.6.0" do outro PC. Se os protocolos diferem, a mensagem diz qual versão cada lado usa.
+- **Bandeja:** ícone com bolinha de estado (verde/âmbar/cinza) e menu dinâmico: Conectar a… (lista de computadores), Enviar arquivo…, Enviar pasta…, Desconectar. Clique esquerdo abre a janela.

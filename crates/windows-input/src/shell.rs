@@ -343,8 +343,13 @@ pub fn open_path(path: &Path) -> bool {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    // SAFETY: `wide` termina em zero e vive durante a chamada.
+    // SAFETY: `wide` termina em zero e vive durante a chamada. O ShellExecute prefere uma
+    // thread com COM inicializado (apartamento único).
     let r = unsafe {
+        let _ = windows::Win32::System::Com::CoInitializeEx(
+            None,
+            windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+        );
         ShellExecuteW(
             None,
             w!("open"),
@@ -364,4 +369,186 @@ pub fn reveal_path(path: &Path) -> bool {
         .raw_arg(format!("/select,\"{}\"", path.display()))
         .spawn()
         .is_ok()
+}
+
+// ---- iniciar com o Windows, firewall e confirmação nativa ------------------------------
+
+const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+const RUN_VALUE: &str = "WindowsFlow";
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Comando registrado para iniciar com o Windows (se houver).
+pub fn autostart_command() -> Option<String> {
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
+    };
+    let (key, val) = (wide(RUN_KEY), wide(RUN_VALUE));
+    // SAFETY: buffers com terminador/tamanho informados à API; a chave é fechada ao final.
+    unsafe {
+        let mut h = HKEY::default();
+        if RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(key.as_ptr()),
+            None,
+            KEY_READ,
+            &mut h,
+        )
+        .0 != 0
+        {
+            return None;
+        }
+        let mut len = 0u32;
+        let probe = RegQueryValueExW(h, PCWSTR(val.as_ptr()), None, None, None, Some(&mut len));
+        let out = if probe.0 == 0 && len >= 2 {
+            let mut buf = vec![0u16; (len as usize).div_ceil(2)];
+            let mut size = len;
+            let r = RegQueryValueExW(
+                h,
+                PCWSTR(val.as_ptr()),
+                None,
+                None,
+                Some(buf.as_mut_ptr().cast()),
+                Some(&mut size),
+            );
+            (r.0 == 0).then(|| {
+                let n = (size as usize / 2).min(buf.len());
+                String::from_utf16_lossy(&buf[..n])
+                    .trim_end_matches('\0')
+                    .to_string()
+            })
+        } else {
+            None
+        };
+        let _ = RegCloseKey(h);
+        out
+    }
+}
+
+/// Liga/desliga o início com o Windows (chave `Run` do usuário; não pede administrador).
+pub fn set_autostart(enabled: bool, command: &str) -> bool {
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
+        KEY_SET_VALUE, REG_SZ,
+    };
+    let (key, val) = (wide(RUN_KEY), wide(RUN_VALUE));
+    // SAFETY: buffers com terminador; a chave é fechada ao final.
+    unsafe {
+        let mut h = HKEY::default();
+        if RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(key.as_ptr()),
+            None,
+            KEY_SET_VALUE,
+            &mut h,
+        )
+        .0 != 0
+        {
+            return false;
+        }
+        let ok = if enabled {
+            let data = wide(command);
+            let bytes = std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), data.len() * 2);
+            RegSetValueExW(h, PCWSTR(val.as_ptr()), None, REG_SZ, Some(bytes)).0 == 0
+        } else {
+            // Já não existir também é sucesso.
+            let r = RegDeleteValueW(h, PCWSTR(val.as_ptr()));
+            r.0 == 0 || r.0 == 2
+        };
+        let _ = RegCloseKey(h);
+        ok
+    }
+}
+
+/// Regras de entrada do firewall do app: (nome, protocolo, porta).
+pub const FIREWALL_RULES: [(&str, &str, u16); 2] = [
+    ("Windows Flow TCP 47800", "TCP", 47_800),
+    ("Windows Flow UDP 47801", "UDP", 47_801),
+];
+
+/// As duas regras já existem? (`netsh show rule` sai com erro quando não há regra; não precisa
+/// de administrador.)
+pub fn firewall_rules_present() -> bool {
+    use std::os::windows::process::CommandExt;
+    FIREWALL_RULES.iter().all(|(name, _, _)| {
+        std::process::Command::new("netsh")
+            .args([
+                "advfirewall",
+                "firewall",
+                "show",
+                "rule",
+                &format!("name={name}"),
+            ])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .output()
+            .is_ok_and(|o| o.status.success())
+    })
+}
+
+/// Comando que cria as regras (só redes privadas e de domínio, nunca pública).
+pub fn firewall_command() -> String {
+    FIREWALL_RULES
+        .iter()
+        .map(|(name, proto, port)| {
+            format!(
+                "netsh advfirewall firewall add rule name=\"{name}\" dir=in action=allow \
+                 protocol={proto} localport={port} profile=private,domain"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" & ")
+}
+
+/// Pede ao Windows (uma vez, com o aviso do UAC) para criar as regras do firewall.
+pub fn request_firewall_rules() -> bool {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+    let params = wide(&format!("/c {}", firewall_command()));
+    // SAFETY: strings com terminador, vivas durante a chamada.
+    let r = unsafe {
+        ShellExecuteW(
+            None,
+            w!("runas"),
+            w!("cmd.exe"),
+            PCWSTR(params.as_ptr()),
+            PCWSTR::null(),
+            SW_HIDE,
+        )
+    };
+    r.0 as usize > 32
+}
+
+/// Caixa de confirmação nativa (Sim/Não), sempre no topo. O padrão é "Não".
+pub fn confirm_box(title: &str, text: &str) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        MessageBoxW, IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO,
+    };
+    let (t, c) = (wide(title), wide(text));
+    // SAFETY: strings com terminador, vivas durante a chamada.
+    let r = unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(c.as_ptr()),
+            PCWSTR(t.as_ptr()),
+            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_TOPMOST | MB_SETFOREGROUND,
+        )
+    };
+    r == IDYES
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn firewall_rules_cover_both_ports_and_never_the_public_profile() {
+        let c = firewall_command();
+        assert!(c.contains("protocol=TCP localport=47800"));
+        assert!(c.contains("protocol=UDP localport=47801"));
+        assert!(c.matches("profile=private,domain").count() == 2);
+        assert!(!c.contains("public") && !c.contains("any"));
+        assert!(c.contains(" & "), "dois comandos encadeados no cmd");
+    }
 }

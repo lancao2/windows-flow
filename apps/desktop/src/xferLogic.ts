@@ -133,3 +133,66 @@ export function recvReducer(s: RecvState, a: RecvAction): RecvState {
       return initialRecv;
   }
 }
+
+/* ---- Lista de transferências (aba Arquivos) -------------------------------------------- */
+
+export interface TransferRow {
+  dir: 'in' | 'out';
+  /** Nome mostrado: o item raiz (e "+N" quando são vários arquivos avulsos). */
+  name: string;
+  isDir: boolean;
+  bytes: number;
+  /** Progresso 0..1 do lote. */
+  p: number;
+  state: 'active' | 'done' | 'cancelled' | 'failed';
+  /** Hora de término (HH:MM) das concluídas. */
+  at?: string;
+}
+
+export interface TransfersState {
+  active: Partial<Record<'in' | 'out', TransferRow>>;
+  history: TransferRow[];
+}
+
+export const initialTransfers: TransfersState = { active: {}, history: [] };
+
+export const hasActiveTransfer = (s: TransfersState) => Boolean(s.active.in || s.active.out);
+
+const clock = () => new Date().toLocaleTimeString().slice(0, 5);
+
+function finish(s: TransfersState, dir: 'in' | 'out', state: TransferRow['state']): TransfersState {
+  const row = s.active[dir];
+  if (!row) return s;
+  const { [dir]: _gone, ...rest } = s.active;
+  void _gone;
+  const done: TransferRow = { ...row, state, p: state === 'done' ? 1 : row.p, at: clock() };
+  return { active: rest, history: [done, ...s.history].slice(0, 20) };
+}
+
+export function transfersReducer(s: TransfersState, f: FileEvent): TransfersState {
+  const progress = f.batch_bytes > 0 ? Math.min(1, f.batch_done / f.batch_bytes) : 1;
+  if (f.state === 'failed' || f.state === 'cancelled') {
+    return finish(s, f.dir, f.state);
+  }
+  const prev = s.active[f.dir];
+  const first = f.index === 0 || !prev;
+  const name = first ? f.root || f.name : prev.name;
+  const isDir = first ? f.is_dir : prev.isDir;
+  const label = !isDir && f.count > 1 && !name.includes(' +') ? `${name} +${f.count - 1}` : name;
+  const next: TransfersState = {
+    ...s,
+    active: {
+      ...s.active,
+      [f.dir]: {
+        dir: f.dir,
+        name: first ? label : prev.name,
+        isDir,
+        bytes: f.batch_bytes,
+        p: progress,
+        state: 'active',
+      },
+    },
+  };
+  if (f.state === 'done' && f.index + 1 >= f.count) return finish(next, f.dir, 'done');
+  return next;
+}

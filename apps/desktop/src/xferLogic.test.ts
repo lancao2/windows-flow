@@ -4,7 +4,10 @@ import {
   RING_C,
   bubbleBox,
   formatBytes,
+  hasActiveTransfer,
   initialRecv,
+  initialTransfers,
+  transfersReducer,
   recvReducer,
   ringOffset,
   type RecvState,
@@ -145,5 +148,48 @@ describe('recvReducer', () => {
 
   it('ignora eventos de envio', () => {
     expect(run([ev({ dir: 'out' })]).phase).toBe('hidden');
+  });
+});
+
+describe('transfersReducer', () => {
+  const runT = (events: FileEvent[]) => events.reduce(transfersReducer, initialTransfers);
+
+  it('acompanha o envio e move para o histórico ao concluir o lote', () => {
+    let s = runT([ev({ dir: 'out' }), ev({ dir: 'out', state: 'progress', batch_done: 40 })]);
+    expect(hasActiveTransfer(s)).toBe(true);
+    expect(s.active.out).toMatchObject({ name: 'a.txt', p: 0.4, state: 'active' });
+    s = transfersReducer(s, ev({ dir: 'out', state: 'done', batch_done: 100 }));
+    expect(hasActiveTransfer(s)).toBe(false);
+    expect(s.history[0]).toMatchObject({ dir: 'out', state: 'done', p: 1 });
+  });
+
+  it('envio e recebimento andam em paralelo, cada um na sua linha', () => {
+    const s = runT([
+      ev({ dir: 'out', name: 'a', root: 'a' }),
+      ev({ dir: 'in', name: 'b', root: 'b' }),
+    ]);
+    expect(Object.keys(s.active).sort()).toEqual(['in', 'out']);
+  });
+
+  it('cancelar e falhar vão para o histórico com o estado certo', () => {
+    let s = runT([ev({ dir: 'in' }), ev({ dir: 'in', state: 'cancelled' })]);
+    expect(s.history[0]).toMatchObject({ dir: 'in', state: 'cancelled' });
+    s = transfersReducer(
+      transfersReducer(s, ev({ dir: 'out', id: 2 })),
+      ev({ dir: 'out', id: 2, state: 'failed' }),
+    );
+    expect(s.history.map((h) => h.state)).toEqual(['failed', 'cancelled']);
+    expect(hasActiveTransfer(s)).toBe(false);
+  });
+
+  it('vários arquivos avulsos viram "nome +N" e pastas mantêm só o nome', () => {
+    const multi = runT([ev({ dir: 'out', count: 3, batch_bytes: 300 })]);
+    expect(multi.active.out?.name).toBe('a.txt +2');
+    const folder = runT([ev({ dir: 'out', count: 3, is_dir: true, root: 'Projeto' })]);
+    expect(folder.active.out?.name).toBe('Projeto');
+  });
+
+  it('cancelar sem nada em andamento não muda nada', () => {
+    expect(transfersReducer(initialTransfers, ev({ state: 'cancelled' }))).toBe(initialTransfers);
   });
 });

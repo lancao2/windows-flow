@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useReducer, useState, type ReactNode } from 'react';
 import type {
   AppSettings,
   ConfirmRequest,
@@ -15,6 +15,8 @@ import {
   IconClock,
   IconCopy,
   IconDashboard,
+  IconDownload,
+  IconFolder,
   IconFile,
   IconInfo,
   IconKeyboard,
@@ -33,8 +35,15 @@ import {
 } from './Icons';
 import { PeerMap } from './PeerMap';
 import { linkLabel, looksLikePeerAddress, sideLabel } from './status';
+import {
+  formatBytes,
+  hasActiveTransfer,
+  initialTransfers,
+  transfersReducer,
+  type TransferRow,
+} from './xferLogic';
 
-type Tab = 'home' | 'connect' | 'settings';
+type Tab = 'home' | 'connect' | 'files' | 'settings';
 type Mode = 'host' | 'join';
 interface Note {
   time: string;
@@ -42,7 +51,7 @@ interface Note {
 }
 
 const noteTone = (m: string): 'ok' | 'bad' | 'info' =>
-  /falha|não foi|erro|recus|cancel|esgotad|diferente/i.test(m)
+  /falha|não foi|erro|recus|cancel|esgotad|diferente|incompat/i.test(m)
     ? 'bad'
     : /conectad|enviad|salv|restaurad/i.test(m)
       ? 'ok'
@@ -92,6 +101,7 @@ export function App() {
   const [peers, setPeers] = useState<PeerInfo[]>([]);
   const [disc, setDisc] = useState<DiscStatus | null>(null);
   const [remember, setRemember] = useState(false);
+  const [transfers, dispatchT] = useReducer(transfersReducer, initialTransfers);
   const [portalOn, setPortalOn] = useState(() => {
     try {
       return localStorage.getItem('portal') !== 'off';
@@ -124,10 +134,15 @@ export function App() {
       onSettings: setSettings,
       onPeers: setPeers,
       onDiscovery: setDisc,
+      onTransfer: dispatchT,
+      onFirewall: () => void api.info().then(setInfo),
       onNotice: (m) =>
-        setNotes((n) =>
-          [{ time: new Date().toLocaleTimeString().slice(0, 5), msg: m }, ...n].slice(0, 30),
-        ),
+        setNotes((n) => {
+          const time = new Date().toLocaleTimeString().slice(0, 5);
+          // O mesmo aviso repetido (ex.: tentativas de reconexão) vira uma linha só.
+          if (n[0]?.msg === m) return [{ msg: m, time }, ...n.slice(1)];
+          return [{ time, msg: m }, ...n].slice(0, 30);
+        }),
     }).then((u) => (cancelled ? u.forEach((f) => f()) : (unlisten = u)));
     void api.info().then(setInfo);
     void api.settings().then(setSettings);
@@ -251,7 +266,7 @@ export function App() {
         ? 'Sem conexão'
         : linkLabel(link);
   const heroSub = connected
-    ? `${peerName ?? peerIp ?? 'outro PC'}${beingControlled ? ' · controlando este PC' : controlling ? ' · você controla o outro' : ''}`
+    ? `${peerName ?? peerIp ?? 'outro PC'}${status?.peer_version ? ` · v${status.peer_version}` : ''}${beingControlled ? ' · controlando este PC' : controlling ? ' · você controla o outro' : ''}`
     : link === 'listening'
       ? `Aguardando em ${info?.local_ip ?? '…'}:${info?.default_port ?? ''}`
       : 'Conecte este PC a outro computador da rede';
@@ -523,6 +538,107 @@ export function App() {
     </div>
   );
 
+  const rowView = (r: TransferRow, active: boolean) => (
+    <div className="row-item xfer-row" key={`${r.dir}-${r.name}-${r.at ?? 'now'}`}>
+      <span className={`ri-icon ${r.dir === 'out' ? 'grad2' : 'grad'}`}>
+        {r.isDir ? <IconFolder /> : r.dir === 'out' ? <IconSend /> : <IconDownload />}
+      </span>
+      <span className="ri-text">
+        <b>{r.name}</b>
+        <small>
+          {r.dir === 'out' ? 'Enviando' : 'Recebendo'} · {formatBytes(r.bytes)}
+          {active ? ` · ${Math.round(r.p * 100)}%` : ''}
+        </small>
+        {active && (
+          <span className="bar">
+            <i style={{ width: `${Math.round(r.p * 100)}%` }} />
+          </span>
+        )}
+      </span>
+      {active ? (
+        <button className="btn mini danger" onClick={() => void api.cancelTransfers()}>
+          Cancelar
+        </button>
+      ) : (
+        <span className="hist-end">
+          <span
+            className={`chip ${r.state === 'done' ? 'ok' : r.state === 'cancelled' ? '' : 'bad'}`}
+          >
+            {r.state === 'done'
+              ? r.dir === 'out'
+                ? 'Enviado'
+                : 'Recebido'
+              : r.state === 'cancelled'
+                ? 'Cancelado'
+                : 'Falhou'}
+          </span>
+          <time>{r.at}</time>
+        </span>
+      )}
+    </div>
+  );
+
+  const filesPage = (
+    <div className="grid two">
+      <section className="card">
+        <header className="card-h">
+          <h2>
+            <IconSend size={18} /> Enviar
+          </h2>
+        </header>
+        <p className="muted">
+          Arraste arquivos ou pastas até a borda da tela e segure por 2 s, ou escolha aqui.
+        </p>
+        <div className="send-btns">
+          <button
+            className="btn primary"
+            disabled={!connected}
+            onClick={() => void api.pickAndSend(false)}
+          >
+            <IconFile size={16} /> Enviar arquivos…
+          </button>
+          <button className="btn" disabled={!connected} onClick={() => void api.pickAndSend(true)}>
+            <IconFolder size={16} /> Enviar pasta…
+          </button>
+        </div>
+        {!connected && <p className="muted tiny">Conecte os dois PCs para enviar.</p>}
+        <header className="card-h sub-h">
+          <h2>Em andamento</h2>
+        </header>
+        <div className="plist">
+          {(['out', 'in'] as const).map((d) => {
+            const r = transfers.active[d];
+            return r ? rowView(r, true) : null;
+          })}
+          {!hasActiveTransfer(transfers) && (
+            <div className="empty">
+              <small>Nenhuma transferência agora.</small>
+            </div>
+          )}
+        </div>
+      </section>
+      <section className="card">
+        <header className="card-h">
+          <h2>
+            <IconClock size={18} /> Histórico
+          </h2>
+          <span className="chip">{transfers.history.length}</span>
+        </header>
+        <div className="plist hist">
+          {transfers.history.slice(0, 6).map((r) => rowView(r, false))}
+          {transfers.history.length === 0 && (
+            <div className="empty">
+              <span className="radar">
+                <IconFile size={30} />
+              </span>
+              <small>Os arquivos enviados e recebidos nesta sessão aparecem aqui.</small>
+            </div>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+
   const settingsPage = (
     <div className="grid three">
       <section className="card">
@@ -548,6 +664,31 @@ export function App() {
               lastPeer ? `Computadores conhecidos · último ${lastPeer}` : 'Computadores conhecidos'
             }
           />
+          <Switch
+            checked={settings?.autostart ?? true}
+            onChange={(v) => void api.setAutostart(v)}
+            icon={<IconPower />}
+            label="Iniciar com o Windows"
+            hint="Abre minimizado na bandeja e já conecta sozinho"
+          />
+          <div className="row-item">
+            <span className={`ri-icon ${info?.firewall_ok ? 'grad' : 'warn'}`}>
+              <IconShield />
+            </span>
+            <span className="ri-text">
+              <b>Firewall do Windows</b>
+              <small>
+                {info?.firewall_ok
+                  ? 'Portas liberadas na rede privada'
+                  : 'Portas não liberadas: o outro PC pode não aparecer'}
+              </small>
+            </span>
+            {!info?.firewall_ok && (
+              <button className="btn mini primary" onClick={() => void api.fixFirewall()}>
+                Liberar
+              </button>
+            )}
+          </div>
           <Switch
             checked={portalOn}
             onChange={setPortalOn}
@@ -670,6 +811,7 @@ export function App() {
   const tabs = [
     ['home', 'Painel', <IconDashboard size={16} key="h" />],
     ['connect', 'Conectar', <IconLink size={16} key="c" />],
+    ['files', 'Arquivos', <IconSend size={16} key="f" />],
     ['settings', 'Ajustes', <IconSliders size={16} key="s" />],
   ] as const;
 
@@ -691,6 +833,7 @@ export function App() {
             >
               {icon}
               {label}
+              {id === 'files' && hasActiveTransfer(transfers) && <i className="tab-dot" />}
             </button>
           ))}
         </nav>
@@ -705,7 +848,15 @@ export function App() {
 
       <main className="content">
         <div className="title-row">
-          <h1>{tab === 'home' ? 'Meu painel' : tab === 'connect' ? 'Conectar' : 'Ajustes'}</h1>
+          <h1>
+            {tab === 'home'
+              ? 'Meu painel'
+              : tab === 'connect'
+                ? 'Conectar'
+                : tab === 'files'
+                  ? 'Arquivos'
+                  : 'Ajustes'}
+          </h1>
           <span className="muted">{info?.device_name}</span>
         </div>
         {(beingControlled || controlling) && (
@@ -721,7 +872,13 @@ export function App() {
             </button>
           </div>
         )}
-        {tab === 'home' ? home : tab === 'connect' ? connectPage : settingsPage}
+        {tab === 'home'
+          ? home
+          : tab === 'connect'
+            ? connectPage
+            : tab === 'files'
+              ? filesPage
+              : settingsPage}
       </main>
 
       {confirm && (

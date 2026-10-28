@@ -604,7 +604,8 @@ pub fn run_preview(app: AppHandle) {
         hide(&app, SEND);
         emit_send(&app, "idle", 0.0, None, 0);
 
-        let file = std::env::temp_dir().join("windows-flow-preview.txt");
+        let ext = std::env::var("WF_PREVIEW_EXT").unwrap_or_else(|_| "txt".into());
+        let file = std::env::temp_dir().join(format!("windows-flow-preview.{ext}"));
         let _ = std::fs::write(&file, "arquivo de teste do Windows Flow");
         let size = 3_400_000u64;
         let ev = |state: &'static str, done: u64| FileEvent {
@@ -644,15 +645,75 @@ fn tray_path(state: &App, id: u64) -> Option<PathBuf> {
         .and_then(|x| x.tray.iter().find(|t| t.id == id).map(|t| t.path.clone()))
 }
 
-/// Duplo clique na bandeja: abre o arquivo (ou a pasta) com o programa padrão.
+/// Extensões que executam código: pedem confirmação antes de abrir um arquivo vindo da rede.
+const RISKY_EXT: [&str; 26] = [
+    "exe",
+    "com",
+    "bat",
+    "cmd",
+    "ps1",
+    "psm1",
+    "vbs",
+    "vbe",
+    "js",
+    "jse",
+    "wsf",
+    "wsh",
+    "msi",
+    "msp",
+    "scr",
+    "pif",
+    "lnk",
+    "hta",
+    "jar",
+    "reg",
+    "cpl",
+    "dll",
+    "appx",
+    "msix",
+    "application",
+    "gadget",
+];
+
+fn is_risky(path: &std::path::Path) -> bool {
+    !path.is_dir()
+        && path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| RISKY_EXT.iter().any(|r| r.eq_ignore_ascii_case(e)))
+}
+
+/// Duplo clique na bandeja: abre o arquivo (ou a pasta) com o programa padrão. Programas e
+/// scripts pedem confirmação antes (o arquivo veio de outro computador).
 #[tauri::command]
-pub fn xfer_open(state: State<'_, App>, id: u64) -> bool {
-    let path = tray_path(&state, id);
-    let ok = path
-        .as_ref()
-        .is_some_and(|p| windows_input::windows_impl::open_path(p));
-    qa_log(&format!("bandeja: abrir id={id} -> {ok} ({path:?})"));
-    ok
+pub async fn xfer_open(app: AppHandle, id: u64) -> bool {
+    let path = app.try_state::<App>().and_then(|st| tray_path(&st, id));
+    let Some(path) = path else {
+        return false;
+    };
+    let risky = is_risky(&path);
+    let p = path.clone();
+    let ok = tauri::async_runtime::spawn_blocking(move || {
+        if risky {
+            let name = p
+                .file_name()
+                .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+            let text = format!(
+                "\"{name}\" é um programa ou script que veio de outro computador.\n\nAbra somente se você confia em quem enviou, pois ele pode alterar ou apagar seus arquivos.\n\nAbrir mesmo assim?"
+            );
+            if !windows_input::windows_impl::confirm_box("Windows Flow — abrir arquivo recebido", &text) {
+                return None;
+            }
+        }
+        Some(windows_input::windows_impl::open_path(&p))
+    })
+    .await
+    .ok()
+    .flatten();
+    qa_log(&format!(
+        "bandeja: abrir id={id} risky={risky} -> {ok:?} ({path:?})"
+    ));
+    ok.unwrap_or(false)
 }
 
 /// Abre o Explorer na pasta do item, com ele selecionado.
@@ -664,4 +725,34 @@ pub fn xfer_reveal(state: State<'_, App>, id: u64) -> bool {
         .is_some_and(|p| windows_input::windows_impl::reveal_path(p));
     qa_log(&format!("bandeja: abrir local id={id} -> {ok} ({path:?})"));
     ok
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn executables_and_scripts_need_confirmation() {
+        for f in [
+            "setup.exe",
+            "RUN.BAT",
+            "a.ps1",
+            "x.Msi",
+            "atalho.lnk",
+            "m.vbs",
+            "j.JAR",
+        ] {
+            assert!(is_risky(Path::new(f)), "{f}");
+        }
+        for f in [
+            "foto.png",
+            "relatorio.pdf",
+            "notas.txt",
+            "semextensao",
+            "arquivo.exe.txt",
+        ] {
+            assert!(!is_risky(Path::new(f)), "{f}");
+        }
+    }
 }

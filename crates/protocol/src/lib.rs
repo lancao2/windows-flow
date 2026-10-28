@@ -7,7 +7,20 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Versão atual do protocolo. Incrementar em mudanças incompatíveis.
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
+
+/// Versões do app (série 0.x) que falam cada versão do protocolo, para explicar ao usuário
+/// qual atualização falta. Só informativo.
+pub fn app_versions_for_protocol(p: u16) -> &'static str {
+    match p {
+        1 => "0.2.x ou anterior",
+        2 => "0.3.0 a 0.3.2",
+        3 => "0.3.3 a 0.4.x",
+        4 => "0.5.x",
+        5 => "0.6.x",
+        _ => "mais nova",
+    }
+}
 
 /// Tamanho máximo de um frame serializado (64 KiB). Os chunks de arquivo viajam
 /// em base64 dentro de um frame e por isso são menores ([`MAX_FILE_CHUNK`]).
@@ -57,6 +70,14 @@ pub enum Message {
         protocol_version: u16,
         device_id: String,
         nonce: [u8; NONCE_LEN],
+        /// Versão do app (para mostrar ao usuário). Ausente em versões antigas.
+        #[serde(default)]
+        app_version: String,
+    },
+    /// Posição do outro PC, do ponto de vista de quem envia (`left|right|top|bottom`); quem
+    /// recebe adota o lado oposto. Mantém os dois PCs coerentes com um único ajuste.
+    PeerSide {
+        side: String,
     },
     Heartbeat {
         seq: u64,
@@ -154,14 +175,23 @@ impl Message {
             Message::Hello {
                 protocol_version,
                 device_id,
+                app_version,
                 ..
             } => {
+                if app_version.len() > 32 {
+                    return Err(ProtocolError::InvalidField("app_version"));
+                }
                 if *protocol_version != PROTOCOL_VERSION {
                     return Err(ProtocolError::UnsupportedVersion(*protocol_version));
                 }
                 if device_id.is_empty() || device_id.len() > 128 {
                     return Err(ProtocolError::InvalidField("device_id"));
                 }
+            }
+            Message::PeerSide { side }
+                if !matches!(side.as_str(), "left" | "right" | "top" | "bottom") =>
+            {
+                return Err(ProtocolError::InvalidField("side"));
             }
             Message::ControlRequest { entry: r } | Message::ControlReleased { exit: r }
                 if *r > MAX_RATIO =>
@@ -368,6 +398,7 @@ mod tests {
             protocol_version: 99,
             device_id: "pc-a".into(),
             nonce: [0; NONCE_LEN],
+            app_version: String::new(),
         };
         assert_eq!(m.validate(), Err(ProtocolError::UnsupportedVersion(99)));
     }
@@ -471,6 +502,24 @@ mod tests {
             offer("a", MAX_FILE_BYTES + 1).validate(),
             Err(ProtocolError::InvalidField("size"))
         );
+    }
+
+    #[test]
+    fn peer_side_is_validated_and_old_hello_still_decodes() {
+        let ok = Message::PeerSide {
+            side: "left".into(),
+        };
+        assert_eq!(decode(&encode(&ok).unwrap()).unwrap(), ok);
+        let bad = Message::PeerSide {
+            side: "diagonal".into(),
+        };
+        assert_eq!(bad.validate(), Err(ProtocolError::InvalidField("side")));
+        // Hello de versões antigas não tem `app_version`.
+        let old = br#"{"type":"hello","protocol_version":5,"device_id":"x","nonce":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}"#;
+        assert!(matches!(
+            decode(old),
+            Ok(Message::Hello { app_version, .. }) if app_version.is_empty()
+        ));
     }
 
     #[test]

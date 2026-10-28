@@ -81,6 +81,8 @@ pub enum Command {
     },
     /// Substitui a lista de computadores confiáveis (impressões digitais).
     SetTrusted(Vec<[u8; 32]>),
+    /// Cancela os envios e recebimentos em andamento (nos dois PCs).
+    CancelTransfers,
     /// Encerra a conexão e esquece a confiança no par.
     Disconnect,
     SetPeerSide(Side),
@@ -134,6 +136,8 @@ pub struct Status {
     pub controlled: bool,
     pub peer_side: &'static str,
     pub peer: Option<String>,
+    /// Versão do app no outro PC (depois do Hello).
+    pub peer_version: Option<String>,
     pub listening: Option<String>,
 }
 
@@ -231,6 +235,7 @@ struct InBatchView {
     root_bytes: u64,
     root_last: bool,
     root_dir: Option<PathBuf>,
+    is_dir: bool,
 }
 
 impl InBatch {
@@ -244,6 +249,7 @@ impl InBatch {
             root_bytes: self.root_bytes,
             root_last: self.root_last,
             root_dir: self.root_dir.clone(),
+            is_dir: self.root_dir.is_some(),
         }
     }
 }
@@ -261,6 +267,10 @@ pub struct Engine<P: Platform> {
     identity: Arc<Identity>,
     trusted: HashSet<[u8; 32]>,
     peer_fp: Option<[u8; 32]>,
+    peer_version: Option<String>,
+    /// Este PC iniciou a conexão (cliente): ele é quem informa a posição ao par no Hello.
+    role_client: bool,
+    last_out_progress: Instant,
     remember_pending: bool,
     pinned: Pinned,
     busy: Arc<AtomicBool>,
@@ -314,6 +324,9 @@ impl<P: Platform + 'static> Engine<P> {
             identity: Arc::new(Identity::generate()?),
             trusted: HashSet::new(),
             peer_fp: None,
+            peer_version: None,
+            role_client: false,
+            last_out_progress: Instant::now(),
             remember_pending: false,
             pinned: Arc::new(Mutex::new(None)),
             busy: Arc::new(AtomicBool::new(false)),
@@ -415,8 +428,16 @@ impl<P: Platform + 'static> Engine<P> {
             controlled: self.controlled,
             peer_side: side_str(self.cfg.peer_side),
             peer: self.peer_addr.map(|a| a.to_string()),
+            peer_version: self.peer_version.clone(),
             listening: self.listening.map(|a| a.to_string()),
         }
+    }
+
+    fn apply_peer_side(&mut self, side: Side) {
+        self.cfg.peer_side = side;
+        self.edge.set_side(side);
+        self.ret.set_side(side);
+        self.emit_status();
     }
 
     fn emit_status(&self) {
@@ -508,6 +529,7 @@ impl<P: Platform + 'static> Engine<P> {
 
     fn drop_link(&mut self) {
         self.peer_fp = None;
+        self.peer_version = None;
         self.abort_transfers(false);
         self.p.performance(false);
         self.link = None;
@@ -581,12 +603,14 @@ impl<P: Platform + 'static> Engine<P> {
                 if self.fsm == State::Remote || self.controlled {
                     self.notice("Não é possível mudar a borda durante o controle.");
                 } else {
-                    self.cfg.peer_side = side;
-                    self.edge.set_side(side);
-                    self.ret.set_side(side);
-                    self.emit_status();
+                    self.apply_peer_side(side);
+                    // O outro PC adota o lado oposto sozinho.
+                    self.send(Message::PeerSide {
+                        side: side_str(side).to_string(),
+                    });
                 }
             }
+            Command::CancelTransfers => self.cancel_transfers(),
             Command::SendFiles { paths, ratio } => self.start_send(paths, ratio),
             Command::Shutdown => return true,
         }
@@ -611,7 +635,13 @@ impl<P: Platform + 'static> Engine<P> {
                 SessionEvent::Message(m) => self.on_message(m),
                 SessionEvent::Closed(reason) => {
                     self.recover(&format!("conexão encerrada ({reason:?})"));
-                    if reason == transport::session::CloseReason::Protocol {
+                    if let transport::session::CloseReason::PeerVersion(v) = reason {
+                        self.notice(format!(
+                            "Versão incompatível: o outro PC usa o Windows Flow {} (protocolo {v}) e este usa a {} (protocolo {PROTOCOL_VERSION}). Atualize o mais antigo para a mesma versão.",
+                            protocol::app_versions_for_protocol(v),
+                            env!("CARGO_PKG_VERSION"),
+                        ));
+                    } else if reason == transport::session::CloseReason::Protocol {
                         self.notice(
                             "Os dois PCs precisam estar na mesma versão do Windows Flow (veja                              a versão no topo do app). Atualize o outro PC.",
                         );
@@ -624,6 +654,7 @@ impl<P: Platform + 'static> Engine<P> {
     }
 
     fn on_incoming(&mut self, chan: SecureChannel) {
+        self.role_client = matches!(self.mode, Mode::Client(_));
         if chan.pinned_match || self.trusted.contains(&chan.peer_fingerprint) {
             // Par já confirmado (nesta execução ou salvo como confiável): sem pedir o código.
             *self.pinned.lock().unwrap_or_else(|e| e.into_inner()) = Some(chan.peer_fingerprint);
@@ -653,6 +684,7 @@ impl<P: Platform + 'static> Engine<P> {
             protocol_version: PROTOCOL_VERSION,
             device_id: self.cfg.device_id.clone(),
             nonce: self.nonce(),
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
         };
         let (handle, mut rx) = session::start(chan, hello);
         self.gen += 1;
@@ -679,9 +711,20 @@ impl<P: Platform + 'static> Engine<P> {
 
     fn on_message(&mut self, m: Message) {
         match m {
-            Message::Hello { device_id, .. } => {
+            Message::Hello {
+                device_id,
+                app_version,
+                ..
+            } => {
                 if let Some(l) = self.link.as_mut() {
                     l.ready = true;
+                }
+                self.peer_version = (!app_version.is_empty()).then_some(app_version);
+                // Quem iniciou a conexão informa a posição: o outro PC adota o lado oposto.
+                if self.role_client {
+                    self.send(Message::PeerSide {
+                        side: side_str(self.cfg.peer_side).to_string(),
+                    });
                 }
                 if let Some(fp) = self.peer_fp {
                     let _ = self.ui.send(UiEvent::PeerHello {
@@ -694,6 +737,17 @@ impl<P: Platform + 'static> Engine<P> {
                 self.p.performance(true);
                 self.notice("Conectado ao outro PC.");
                 self.emit_status();
+            }
+            Message::PeerSide { side } => {
+                if let Some(side) = Side::parse(&side) {
+                    // Só age se mudou: reaplicar o mesmo lado travaria a borda sem necessidade.
+                    if self.fsm != State::Remote
+                        && !self.controlled
+                        && side.opposite() != self.cfg.peer_side
+                    {
+                        self.apply_peer_side(side.opposite());
+                    }
+                }
             }
             Message::ControlRequest { entry } => self.on_control_request(entry),
             Message::ControlGranted => {
@@ -949,16 +1003,32 @@ impl<P: Platform + 'static> Engine<P> {
                 .flatten(),
             root_bytes: b.root_bytes,
             root_last: state == "done" && b.root_last,
-            is_dir: b.root_dir.is_some(),
+            is_dir: b.is_dir,
             path,
         }));
     }
 
     /// Cancela tudo o que está em andamento. `tell_peer`: avisa o outro PC.
     fn abort_transfers(&mut self, tell_peer: bool) {
+        self.abort_with(tell_peer, "failed");
+    }
+
+    /// O usuário cancelou: para tudo nos dois PCs.
+    fn cancel_transfers(&mut self) {
+        if self.outgoing.is_none() && self.incoming.is_none() {
+            return;
+        }
+        self.abort_with(true, "cancelled");
+        self.notice("Transferência cancelada.");
+    }
+
+    fn abort_with(&mut self, tell_peer: bool, state: &'static str) {
         if let Some(o) = self.outgoing.take() {
             if tell_peer {
                 self.send(Message::FileCancel { id: o.id });
+            }
+            if let Some(v) = self.out_view(&o, 0) {
+                self.emit_file("out", state, (o.id, &o.name, o.size, v.1), &v.0, None);
             }
         }
         self.out_batch = None;
@@ -968,17 +1038,39 @@ impl<P: Platform + 'static> Engine<P> {
             }
             if let Some(b) = &self.in_batch {
                 let view = b.view();
-                self.emit_file(
-                    "in",
-                    "failed",
-                    (i.id, &i.name, i.size, b.index),
-                    &view,
-                    None,
-                );
+                self.emit_file("in", state, (i.id, &i.name, i.size, b.index), &view, None);
             }
         }
         self.in_batch = None;
         self.in_roots.clear();
+    }
+
+    /// Números do lote em envio para um [`FileEvent`]: (visão, índice do arquivo atual).
+    fn out_view(&self, o: &Outgoing, extra: u64) -> Option<(InBatchView, u32)> {
+        let b = self.out_batch.as_ref()?;
+        let root = o.rel.split('/').next().unwrap_or(&o.name).to_string();
+        Some((
+            InBatchView {
+                count: b.count,
+                bytes: b.bytes,
+                done: b.done + extra,
+                ratio: b.ratio,
+                root,
+                root_bytes: o.root_bytes,
+                root_last: o.root_last,
+                root_dir: None,
+                is_dir: o.rel.contains('/'),
+            },
+            b.next_index.saturating_sub(1),
+        ))
+    }
+
+    fn emit_out(&self, state: &'static str, extra: u64) {
+        if let Some(o) = &self.outgoing {
+            if let Some(v) = self.out_view(o, extra) {
+                self.emit_file("out", state, (o.id, &o.name, o.size, v.1), &v.0, None);
+            }
+        }
     }
 
     fn start_send(&mut self, paths: Vec<PathBuf>, ratio: u16) {
@@ -1043,6 +1135,7 @@ impl<P: Platform + 'static> Engine<P> {
             ratio: b.ratio,
         };
         self.outgoing = Some(o);
+        self.emit_out("offer", 0);
         if !self.send(offer) {
             self.abort_transfers(false);
             self.notice("Não foi possível iniciar o envio do arquivo.");
@@ -1086,6 +1179,10 @@ impl<P: Platform + 'static> Engine<P> {
     }
 
     fn finish_outgoing(&mut self) {
+        if let Some(o) = self.outgoing.as_ref() {
+            let size = o.size;
+            self.emit_out("done", size);
+        }
         if let Some(o) = self.outgoing.take() {
             if let Some(b) = self.out_batch.as_mut() {
                 b.done += o.size;
@@ -1102,19 +1199,24 @@ impl<P: Platform + 'static> Engine<P> {
             return;
         };
         o.ack(offset);
+        let acked = o.acked();
         if o.is_done() {
             self.finish_outgoing();
         } else {
+            if self.last_out_progress.elapsed() >= PROGRESS_INTERVAL {
+                self.last_out_progress = Instant::now();
+                self.emit_out("progress", acked);
+            }
             self.pump_out();
         }
     }
 
     fn on_file_cancel(&mut self, id: u64) {
         if self.outgoing.as_ref().is_some_and(|o| o.id == id) {
-            self.abort_transfers(false);
+            self.abort_with(false, "cancelled");
             self.notice("O outro PC cancelou o recebimento.");
         } else if self.incoming.as_ref().is_some_and(|i| i.id == id) {
-            self.abort_transfers(false);
+            self.abort_with(false, "cancelled");
             self.notice("O outro PC cancelou o envio.");
         }
     }
